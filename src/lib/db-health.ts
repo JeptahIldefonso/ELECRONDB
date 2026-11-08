@@ -83,30 +83,56 @@ export async function checkDatabaseHealth(forceFresh = false): Promise<DbHealthR
       }
       const existingTableNames = new Set(masterTables.map((t) => t.name.toUpperCase()));
 
-      // Inspect each canonical table
+      // Inspect each canonical table (batched for high-speed single round-trip)
       const tables: TableHealth[] = [];
       let tablesFound = 0;
 
-      for (const tableName of CANONICAL_ERD_TABLES) {
-        const exists = existingTableNames.has(tableName);
-        let rows = 0;
-        if (exists) {
-          tablesFound++;
-          try {
-            const querySql = db.engine === 'postgres'
-              ? `SELECT COUNT(*)::int as count FROM "${tableName.toLowerCase()}"`
-              : `SELECT COUNT(*) as count FROM "${tableName}"`;
-            const countRow = await db.get<{ count: number }>(querySql);
-            rows = countRow?.count ?? 0;
-          } catch {
-            // Table exists but query failed
+      if (db.engine === 'postgres') {
+        try {
+          const unionSql = CANONICAL_ERD_TABLES.map(
+            (t) => `SELECT '${t}' as tbl, count(*)::int as cnt FROM "${t.toLowerCase()}"`
+          ).join(' UNION ALL ');
+          const countRows = await db.query<{ tbl: string; cnt: number }>(unionSql);
+          const countMap = new Map(countRows.map((r: any) => [String(r.tbl).toUpperCase(), Number(r.cnt ?? 0)]));
+          for (const tableName of CANONICAL_ERD_TABLES) {
+            const exists = countMap.has(tableName);
+            if (exists) tablesFound++;
+            tables.push({
+              name: tableName,
+              exists,
+              rows: countMap.get(tableName) ?? 0,
+            });
+          }
+        } catch {
+          // fallback to individual queries if batch fails
+          for (const tableName of CANONICAL_ERD_TABLES) {
+            const exists = existingTableNames.has(tableName);
+            let rows = 0;
+            if (exists) {
+              tablesFound++;
+              try {
+                const countRow = await db.get<{ count: number }>(`SELECT COUNT(*)::int as count FROM "${tableName.toLowerCase()}"`);
+                rows = countRow?.count ?? 0;
+              } catch {}
+            }
+            tables.push({ name: tableName, exists, rows });
           }
         }
-        tables.push({
-          name: tableName,
-          exists,
-          rows,
-        });
+      } else {
+        await Promise.all(
+          CANONICAL_ERD_TABLES.map(async (tableName) => {
+            const exists = existingTableNames.has(tableName);
+            let rows = 0;
+            if (exists) {
+              tablesFound++;
+              try {
+                const countRow = await db.get<{ count: number }>(`SELECT COUNT(*) as count FROM "${tableName}"`);
+                rows = countRow?.count ?? 0;
+              } catch {}
+            }
+            tables.push({ name: tableName, exists, rows });
+          })
+        );
       }
 
       const isFull = tablesFound === CANONICAL_ERD_TABLES.length;
