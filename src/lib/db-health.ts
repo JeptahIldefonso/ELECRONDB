@@ -38,7 +38,7 @@ export function getBusinessDb(): HopeDatabase {
 }
 
 /**
- * Performs timed verification against hope.db/Turso without exposing internal secrets or paths.
+ * Performs timed verification against hope.db/Turso/Postgres without exposing internal secrets or paths.
  */
 export async function checkDatabaseHealth(forceFresh = false): Promise<DbHealthResult> {
   const now = Date.now();
@@ -71,9 +71,16 @@ export async function checkDatabaseHealth(forceFresh = false): Promise<DbHealthR
       const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
 
       // Discover existing tables
-      const masterTables = await db.query<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type = 'table'"
-      );
+      let masterTables: Array<{ name: string }> = [];
+      if (db.engine === 'postgres') {
+        masterTables = await db.query<{ name: string }>(
+          "SELECT tablename as name FROM pg_tables WHERE schemaname = 'public'"
+        );
+      } else {
+        masterTables = await db.query<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table'"
+        );
+      }
       const existingTableNames = new Set(masterTables.map((t) => t.name.toUpperCase()));
 
       // Inspect each canonical table
@@ -86,9 +93,10 @@ export async function checkDatabaseHealth(forceFresh = false): Promise<DbHealthR
         if (exists) {
           tablesFound++;
           try {
-            const countRow = await db.get<{ count: number }>(
-              `SELECT COUNT(*) as count FROM "${tableName}"`
-            );
+            const querySql = db.engine === 'postgres'
+              ? `SELECT COUNT(*)::int as count FROM "${tableName.toLowerCase()}"`
+              : `SELECT COUNT(*) as count FROM "${tableName}"`;
+            const countRow = await db.get<{ count: number }>(querySql);
             rows = countRow?.count ?? 0;
           } catch {
             // Table exists but query failed
@@ -121,7 +129,9 @@ export async function checkDatabaseHealth(forceFresh = false): Promise<DbHealthR
         message = `Missing ${CANONICAL_ERD_TABLES.length - tablesFound} table(s)`;
       }
 
-      const engineName = db.isTurso
+      const engineName = db.engine === 'postgres'
+        ? 'Supabase PostgreSQL'
+        : db.isTurso
         ? 'Turso Cloud libSQL'
         : db.isReadOnly
         ? 'SQLite (bundled read-only)'
@@ -149,57 +159,49 @@ export async function checkDatabaseHealth(forceFresh = false): Promise<DbHealthR
 
     cachedHealth = {
       result,
-      expiresAt: now + (result.connected ? 10_000 : 2_000),
+      expiresAt: now + (result.status === 'connected' ? 10_000 : 2_000),
     };
 
     return result;
   } catch (err: any) {
-    const rawCode = err?.code;
-    let reason: DbHealthReason = 'query_failed';
-    let message = 'The server could not reach or query the database.';
+    const rawError = err?.message || String(err);
+    const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
 
-    if (rawCode === 'file_missing') {
+    let reason: DbHealthReason = 'query_failed';
+    let message = 'The database is currently unreachable.';
+
+    if (err?.code === 'file_missing') {
       reason = 'file_missing';
-      message = 'Database file missing';
-    } else if (rawCode === 'open_failed') {
+      message = 'Bundled seed database is missing on disk.';
+    } else if (err?.code === 'open_failed') {
       reason = 'open_failed';
-      message = 'Could not open database connection';
-    } else if (rawCode === 'timeout' || String(err?.message || '').toLowerCase().includes('timeout')) {
+      message = 'Failed to open local database connection.';
+    } else if (err?.code === 'timeout' || rawError.includes('timeout')) {
       reason = 'timeout';
-      message = 'Database check timed out';
+      message = 'Database query timed out.';
+    } else if (rawError.includes('no such table')) {
+      reason = 'table_missing';
+      message = 'One or more required canonical tables are missing.';
     }
 
-    console.error(`[db-health] Health check failed (${reason}):`, err?.message || err);
-
-    const db = getHopeDb();
-    const engineName = db.isTurso
-      ? 'Turso Cloud libSQL'
-      : db.isReadOnly
-      ? 'SQLite (bundled read-only)'
-      : 'SQLite (hope.work.db)';
-
-    const disconnectedResult: DbHealthResult = {
+    const failedResult: DbHealthResult = {
       connected: false,
       status: 'disconnected',
-      engine: engineName,
+      engine: 'Unknown / Unreachable',
       tablesExpected: CANONICAL_ERD_TABLES.length,
       tablesFound: 0,
-      latencyMs: Math.round(performance.now() - startTime),
+      latencyMs,
       checkedAt: checkedAtTime,
-      tables: CANONICAL_ERD_TABLES.map((name) => ({
-        name,
-        exists: false,
-        rows: 0,
-      })),
+      tables: CANONICAL_ERD_TABLES.map((name) => ({ name, exists: false, rows: 0 })),
       reason,
       message,
     };
 
     cachedHealth = {
-      result: disconnectedResult,
+      result: failedResult,
       expiresAt: now + 2_000,
     };
 
-    return disconnectedResult;
+    return failedResult;
   }
 }
