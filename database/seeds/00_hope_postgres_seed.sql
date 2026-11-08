@@ -1169,11 +1169,14 @@ BEGIN
     END IF;
 
     CASE TG_TABLE_NAME
-        WHEN 'employee' THEN
-            SELECT count(*) INTO v_n FROM (
-                SELECT 1 FROM jobhistory WHERE empno = OLD.empno AND NOT is_deleted
-                UNION ALL
-                SELECT 1 FROM sales      WHERE empno = OLD.empno AND NOT is_deleted) c;
+                WHEN 'employee' THEN
+            UPDATE jobhistory
+               SET is_deleted = TRUE,
+                   stamp = 'DELETED system ' || to_char(now() AT TIME ZONE 'Asia/Manila', 'YYYY-MM-DD HH12:MI AM')
+             WHERE empno = OLD.empno AND NOT is_deleted;
+
+            SELECT count(*) INTO v_n FROM sales
+             WHERE empno = OLD.empno AND NOT is_deleted;
         WHEN 'department' THEN
             SELECT count(*) INTO v_n FROM jobhistory
              WHERE deptcode = OLD.deptcode AND NOT is_deleted;

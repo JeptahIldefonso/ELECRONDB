@@ -327,7 +327,15 @@ export async function deleteEmployeeAction(empNo: string) {
     const existing = await db.get<any>('SELECT is_deleted, sepDate FROM EMPLOYEE WHERE empNo = ?', [cleanEmpNo]);
     if (!existing) return { error: `Employee ${cleanEmpNo} not found.` };
 
-    const today = new Date().toISOString().split('T')[0];
+        const today = new Date().toISOString().split('T')[0];
+
+    // Cascade soft-delete active job history first
+    await db.run(`
+      UPDATE JOBHISTORY
+      SET is_deleted = 1, stamp = ?
+      WHERE empNo = ? AND is_deleted = 0
+    `, [stampStr, cleanEmpNo]);
+
     await db.run(`
       UPDATE EMPLOYEE
       SET is_deleted = 1, stamp = ?, sepDate = COALESCE(sepDate, ?)
