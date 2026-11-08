@@ -169,7 +169,7 @@ export async function addEmployeeAction(input: AddEmployeeInput) {
 
     await db.batch([
       {
-        sql: `INSERT INTO EMPLOYEE (empNo, lastName, firstName, gender, birthDate, hireDate, sepDate, is_deleted, stamp) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?)`,
+        sql: `INSERT INTO EMPLOYEE (empNo, lastName, firstName, gender, birthDate, hireDate, sepDate, is_deleted, stamp) VALUES (?, ?, ?, ?, ?, ?, NULL, false, ?)`,
         args: [
           nextEmpNo,
           validated.lastName,
@@ -181,7 +181,7 @@ export async function addEmployeeAction(input: AddEmployeeInput) {
         ],
       },
       {
-        sql: `INSERT INTO JOBHISTORY (empNo, jobCode, effDate, salary, deptCode, is_deleted, stamp) VALUES (?, ?, ?, ?, ?, 0, ?)`,
+        sql: `INSERT INTO JOBHISTORY (empNo, jobCode, effDate, salary, deptCode, is_deleted, stamp) VALUES (?, ?, ?, ?, ?, false, ?)`,
         args: [
           nextEmpNo,
           validated.jobCode,
@@ -405,7 +405,7 @@ export async function addJobAction(jobCode: string, jobDesc: string) {
 
     await db.run(`
       INSERT INTO JOB (jobCode, jobDesc, is_deleted, stamp)
-      VALUES (?, ?, 0, ?)
+      VALUES (?, ?, false, ?)
     `, [code, desc, stampStr]);
 
     await logAudit(db, 'JOB', 'ADD', code, null, { jobCode: code, jobDesc: desc }, userName);
@@ -531,7 +531,7 @@ export async function addDepartmentAction(deptCode: string, deptName: string) {
 
     await db.run(`
       INSERT INTO DEPARTMENT (deptCode, deptName, is_deleted, stamp)
-      VALUES (?, ?, 0, ?)
+      VALUES (?, ?, false, ?)
     `, [code, name, stampStr]);
 
     await logAudit(db, 'DEPARTMENT', 'ADD', code, null, { deptCode: code, deptName: name }, userName);
@@ -683,7 +683,7 @@ export async function addJobHistoryAction(input: JobHistoryInput) {
 
     await db.run(`
       INSERT INTO JOBHISTORY (empNo, jobCode, effDate, salary, deptCode, is_deleted, stamp)
-      VALUES (?, ?, ?, ?, ?, 0, ?)
+      VALUES (?, ?, ?, ?, ?, false, ?)
     `, [cleanEmpNo, cleanJobCode, validated.effDate, validated.salary, cleanDeptCode, stampStr]);
 
     await logAudit(db, 'JOBHISTORY', 'ADD', `${cleanEmpNo}:${cleanJobCode}:${validated.effDate}`, null, {

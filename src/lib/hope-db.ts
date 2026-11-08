@@ -283,6 +283,30 @@ export function adaptSqlForPostgres(sql: string): string {
   s = s.replace(/(\b[a-zA-Z0-9_]+\.)?is_deleted\s*(!=|<>)(\s*)0\b/gi, (_, p) => (p || '') + 'is_deleted = true');
   s = s.replace(/(\b[a-zA-Z0-9_]+\.)?is_deleted\s*(!=|<>)(\s*)1\b/gi, (_, p) => (p || '') + 'is_deleted = false');
 
+  // Adapt INSERT statements containing is_deleted column:
+  // e.g. INSERT INTO table (..., is_deleted, ...) VALUES (..., 0, ...) -> (..., false, ...)
+  const insertRegex = /INSERT\s+INTO\s+([a-zA-Z0-9_"]+)\s*\(([\s\S]*?)\)\s*VALUES\s*\(([\s\S]*?)\)/i;
+  const match = s.match(insertRegex);
+  if (match) {
+    const cols = match[2].split(',').map((c) => c.trim().toLowerCase());
+    const isDeletedIdx = cols.indexOf('is_deleted');
+    if (isDeletedIdx !== -1) {
+      const vals = match[3].split(',').map((v) => v.trim());
+      if (isDeletedIdx < vals.length) {
+        if (vals[isDeletedIdx] === '0') {
+          vals[isDeletedIdx] = 'false';
+        } else if (vals[isDeletedIdx] === '1') {
+          vals[isDeletedIdx] = 'true';
+        }
+      }
+      const newValuesClause = vals.join(', ');
+      s = s.replace(match[0], `INSERT INTO ${match[1]} (${match[2]}) VALUES (${newValuesClause})`);
+    }
+  }
+
+  // Remove invalid MAX(CAST(transNo AS INTEGER)) fallback that crashes on alphanumeric strings in PostgreSQL
+  s = s.replace(/MAX\s*\(\s*CAST\s*\(\s*transNo\s+AS\s+INTEGER\s*\)\s*\)\s*,\s*/gi, '');
+
   // Convert SQLite date('now') to CURRENT_DATE
   s = s.replace(/date\s*\(\s*'now'[^)]*\)/gi, 'CURRENT_DATE');
 

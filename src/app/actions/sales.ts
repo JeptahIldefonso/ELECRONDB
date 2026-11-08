@@ -105,8 +105,7 @@ export async function createSaleHeaderAction(input: z.infer<typeof createSaleHea
     const nextRow = await db.get<any>(`
       SELECT COALESCE(
         MAX(CAST(SUBSTR(transNo, 3) AS INTEGER)),
-        MAX(CAST(transNo AS INTEGER)),
-        0
+                0
       ) + 1 AS nextNum FROM SALES
     `);
     const nextNum = Number(nextRow?.nextNum || 125);
@@ -115,7 +114,7 @@ export async function createSaleHeaderAction(input: z.infer<typeof createSaleHea
 
     await db.run(`
       INSERT INTO SALES (transNo, salesDate, custNo, empNo, is_deleted, stamp)
-      VALUES (?, ?, ?, ?, 0, ?)
+      VALUES (?, ?, ?, ?, false, ?)
     `, [transNo, validated.salesDate, validated.custNo, validated.empNo, stampStr]);
 
     await logAudit(db, 'SALES', 'ADD', transNo, null, {
@@ -270,7 +269,7 @@ export async function addLineItemAction(input: z.infer<typeof lineItemSchema>) {
 
     await db.run(`
       INSERT INTO SALESDETAIL (transNo, prodCode, quantity, is_deleted, stamp)
-      VALUES (?, ?, ?, 0, ?)
+      VALUES (?, ?, ?, false, ?)
     `, [cleanTrans, cleanProd, validated.quantity, stampStr]);
 
     await logAudit(db, 'SALESDETAIL', 'ADD', `${cleanTrans}:${cleanProd}`, null, {
@@ -430,8 +429,7 @@ export async function createSaleAction(input: CreateSaleInput) {
     const nextRow = await db.get<any>(`
       SELECT COALESCE(
         MAX(CAST(SUBSTR(transNo, 3) AS INTEGER)),
-        MAX(CAST(transNo AS INTEGER)),
-        0
+                0
       ) + 1 AS nextNum FROM SALES
     `);
     const nextNum = Number(nextRow?.nextNum || 125);
@@ -441,7 +439,7 @@ export async function createSaleAction(input: CreateSaleInput) {
     // 4. Wrap header + lines in an atomic LibSQL batch transaction
     const batchStatements: Array<{ sql: string; args: any[] }> = [
       {
-        sql: `INSERT INTO SALES (transNo, salesDate, custNo, empNo, is_deleted, stamp) VALUES (?, ?, ?, ?, 0, ?)`,
+        sql: `INSERT INTO SALES (transNo, salesDate, custNo, empNo, is_deleted, stamp) VALUES (?, ?, ?, ?, false, ?)`,
         args: [transNo, validatedHeader.salesDate, validatedHeader.custNo, validatedHeader.empNo, stampStr],
       },
     ];
@@ -450,7 +448,7 @@ export async function createSaleAction(input: CreateSaleInput) {
       for (const item of items) {
         const cleanProd = String(item.prodCode).trim().toUpperCase();
         batchStatements.push({
-          sql: `INSERT INTO SALESDETAIL (transNo, prodCode, quantity, is_deleted, stamp) VALUES (?, ?, ?, 0, ?)`,
+          sql: `INSERT INTO SALESDETAIL (transNo, prodCode, quantity, is_deleted, stamp) VALUES (?, ?, ?, false, ?)`,
           args: [transNo, cleanProd, Number(item.quantity), stampStr],
         });
       }

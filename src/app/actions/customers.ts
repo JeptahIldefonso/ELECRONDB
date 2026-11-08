@@ -123,7 +123,7 @@ export async function addCustomerAction(input: AddCustomerInput) {
 
     await db.run(`
       INSERT INTO CUSTOMER (custNo, custName, address, payterm, is_deleted, stamp)
-      VALUES (?, ?, ?, ?, 0, ?)
+      VALUES (?, ?, ?, ?, false, ?)
     `, [validated.custNo, validated.custName, validated.address, validated.payTerms, stampStr]);
 
     // Audit log

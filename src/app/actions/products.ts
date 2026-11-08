@@ -81,14 +81,14 @@ export async function addProductAction(input: AddProductInput) {
     // Atomic insert of product and initial price using LibSQL batch
     const batchStatements: Array<{ sql: string; args: any[] }> = [
       {
-        sql: `INSERT INTO PRODUCT (prodCode, description, unit, is_deleted, stamp) VALUES (?, ?, ?, 0, ?)`,
+        sql: `INSERT INTO PRODUCT (prodCode, description, unit, is_deleted, stamp) VALUES (?, ?, ?, false, ?)`,
         args: [code, validated.description, validated.unit, stampStr],
       },
     ];
 
     if (validated.initialPrice && validated.effDate) {
       batchStatements.push({
-        sql: `INSERT INTO PRICEHIST (effDate, prodCode, unitPrice, is_deleted, stamp) VALUES (?, ?, ?, 0, ?)`,
+        sql: `INSERT INTO PRICEHIST (effDate, prodCode, unitPrice, is_deleted, stamp) VALUES (?, ?, ?, false, ?)`,
         args: [validated.effDate, code, validated.initialPrice, stampStr],
       });
     }
@@ -315,7 +315,7 @@ export async function addPriceAction(input: PriceRecordInput) {
 
     await db.run(`
       INSERT INTO PRICEHIST (effDate, prodCode, unitPrice, is_deleted, stamp)
-      VALUES (?, ?, ?, 0, ?)
+      VALUES (?, ?, ?, false, ?)
     `, [validated.effDate, code, validated.unitPrice, stampStr]);
 
     try {
