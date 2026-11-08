@@ -274,6 +274,9 @@ export function adaptSqlForPostgres(sql: string): string {
     }
   }
 
+  // Convert '= LOWER(?)' to '= ?' to avoid PostgreSQL function lower(unknown) parameter type error
+  s = s.replace(/=\s*LOWER\s*\(\s*\?\s*\)/gi, '= ?');
+
   return convertSqlPlaceholders(s);
 }
 

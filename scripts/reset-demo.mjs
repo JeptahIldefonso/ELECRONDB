@@ -165,6 +165,15 @@ async function resetPostgres(databaseUrl) {
         role: 'User',
         allRights: false,
       },
+      {
+        userId: 'usr-dev-jeptah',
+        firstName: 'Jeptah Ashley',
+        lastName: 'Ildefonso',
+        email: 'ildefonsojeptahashleyr@gmail.com',
+        pass: 'usersuperadmin',
+        role: 'Superadmin',
+        allRights: true,
+      },
     ];
 
     for (const acc of demoAccounts) {

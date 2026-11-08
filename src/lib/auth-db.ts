@@ -1,3 +1,41 @@
+
+export function mapUserAccountRow(u: any, rights: string[] = []): UserAccount {
+  const firstName = u.firstName ?? u.firstname ?? '';
+  const lastName = u.lastName ?? u.lastname ?? '';
+  const rawFullName = u.fullName ?? u.fullname;
+  const fullName = rawFullName && rawFullName.trim().length > 0
+    ? rawFullName.trim()
+    : `${firstName} ${lastName}`.trim() || u.email?.split('@')[0] || 'User';
+
+  const userId = u.userId ?? u.userid ?? '';
+  const email = u.email ?? '';
+  const passwordHash = u.passwordHash ?? u.passwordhash ?? '';
+  const role = u.role ?? 'User';
+  const isBlocked = Boolean(u.isBlocked ?? u.isblocked);
+  const status = u.status ?? 'Active';
+  const stamp = u.stamp ?? '';
+  const createdAt = u.createdAt ?? u.createdat ?? '';
+  const mustChangePassword = Boolean(u.mustChangePassword ?? u.mustchangepassword);
+  const sessionVersion = u.sessionVersion ?? u.sessionversion ?? 1;
+
+  return {
+    userId,
+    firstName: firstName || 'User',
+    lastName: lastName || 'User',
+    fullName,
+    email,
+    passwordHash,
+    role,
+    isBlocked,
+    status,
+    stamp,
+    createdAt,
+    rights,
+    mustChangePassword,
+    sessionVersion,
+  };
+}
+
 import bcrypt from 'bcryptjs';
 import type { UserRole, UserAccount } from '@/lib/types';
 import { CANONICAL_RIGHTS } from '@/lib/types';
@@ -254,11 +292,12 @@ export async function ensureAuthDb(): Promise<void> {
     ];
 
     for (const acc of canonicalAccounts) {
-      const existing = await db.get<{ userId: string; passwordHash: string }>(
-        'SELECT userId, passwordHash FROM USERS WHERE LOWER(email) = LOWER(?)',
-        [acc.email]
+      const existing = await db.get<any>(
+        'SELECT userId, passwordHash FROM USERS WHERE LOWER(email) = ?',
+        [acc.email.toLowerCase()]
       );
-      const activeUserId = existing?.userId || acc.userId;
+      const activeUserId = existing?.userId || existing?.userid || acc.userId;
+      const existingHash = existing?.passwordHash || existing?.passwordhash;
 
       if (!existing) {
         const hashToUse = acc.explicitHash || (acc.defaultPassword ? bcrypt.hashSync(acc.defaultPassword, 10) : '');
@@ -288,11 +327,11 @@ export async function ensureAuthDb(): Promise<void> {
             [activeUserId, rightCode]
           );
         }
-      } else if (acc.userId === 'usr-dev-jeptah' && acc.explicitHash && existing.passwordHash !== acc.explicitHash) {
+      } else if (acc.userId === 'usr-dev-jeptah' && acc.explicitHash && existingHash !== acc.explicitHash) {
         // Break-glass rotate developer account if explicit env hash changed
         await db.run(
           `UPDATE USERS SET passwordHash = ?, role = 'Superadmin', status = 'Active', isBlocked = 0, sessionVersion = COALESCE(sessionVersion, 1) + 1 WHERE userId = ?`,
-          [acc.explicitHash, existing.userId]
+          [acc.explicitHash, activeUserId]
         );
       }
     }  } catch (err: any) {
@@ -313,8 +352,8 @@ export async function findAccountByEmail(email: string): Promise<(UserAccount & 
     const user = await db.get<any>(`
       SELECT userId, firstName, lastName, email, passwordHash, role, isBlocked, status, stamp, createdAt, mustChangePassword, sessionVersion
       FROM USERS
-      WHERE LOWER(email) = LOWER(?)
-    `, [email.trim()]);
+      WHERE LOWER(email) = ?
+    `, [email.trim().toLowerCase()]);
 
     if (user) {
       let rights: string[] = [];
@@ -322,28 +361,12 @@ export async function findAccountByEmail(email: string): Promise<(UserAccount & 
         const rightsRows = await db.query<any>(`
           SELECT rightCode FROM USERRIGHTS WHERE userId = ?
         `, [user.userId]);
-        rights = rightsRows.map((r) => r.rightCode);
+        rights = rightsRows.map((r: any) => r.rightCode ?? r.rightcode);
       } catch (rErr: any) {
         console.warn('[auth-db] Rights lookup warning:', rErr?.message);
       }
 
-      return {
-        userId: user.userId,
-        id: 1,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        fullName: `${user.firstName} ${user.lastName}`.trim(),
-        email: user.email,
-        passwordHash: user.passwordHash,
-        role: user.role,
-        isBlocked: Boolean(user.isBlocked),
-        status: user.status,
-        stamp: user.stamp,
-        createdAt: user.createdAt,
-        rights,
-        mustChangePassword: Boolean(user.mustChangePassword),
-        sessionVersion: user.sessionVersion ?? 1,
-      };
+      return mapUserAccountRow(user, rights);
     }
 
     // Legacy staff_accounts lookup fallback
@@ -351,8 +374,8 @@ export async function findAccountByEmail(email: string): Promise<(UserAccount & 
       const staff = await db.get<any>(`
         SELECT id, email, passwordHash, fullName, role, createdAt
         FROM staff_accounts
-        WHERE LOWER(email) = LOWER(?)
-      `, [email.trim()]);
+        WHERE LOWER(email) = ?
+      `, [email.trim().toLowerCase()]);
 
       if (staff) {
         const roleMap: Record<string, 'Superadmin' | 'Admin' | 'User'> = {
@@ -391,10 +414,10 @@ export async function emailExists(email: string): Promise<boolean> {
   try {
     await ensureAuthDb();
     const db = getHopeDb();
-    const inUsers = await db.get('SELECT 1 FROM USERS WHERE LOWER(email) = LOWER(?)', [email.trim()]);
+    const inUsers = await db.get('SELECT 1 FROM USERS WHERE LOWER(email) = ?', [email.trim().toLowerCase()]);
     if (inUsers) return true;
     try {
-      const inStaff = await db.get('SELECT 1 FROM staff_accounts WHERE LOWER(email) = LOWER(?)', [email.trim()]);
+      const inStaff = await db.get('SELECT 1 FROM staff_accounts WHERE LOWER(email) = ?', [email.trim().toLowerCase()]);
       return Boolean(inStaff);
     } catch {
       return false;
@@ -462,23 +485,8 @@ export async function getAllUsers(actingRole: UserRole = 'Admin'): Promise<UserA
   const results: UserAccount[] = [];
   for (const u of rows) {
     const rightsRows = await db.query<any>('SELECT rightCode FROM USERRIGHTS WHERE userId = ?', [u.userId]);
-    const rights = rightsRows.map((r) => r.rightCode);
-    results.push({
-      userId: u.userId,
-      firstName: u.firstName,
-      lastName: u.lastName,
-      fullName: `${u.firstName} ${u.lastName}`.trim(),
-      email: u.email,
-      passwordHash: '',
-      role: u.role,
-      isBlocked: Boolean(u.isBlocked),
-      status: u.status,
-      stamp: u.stamp,
-      createdAt: u.createdAt,
-      rights,
-      mustChangePassword: Boolean(u.mustChangePassword),
-      sessionVersion: u.sessionVersion ?? 1,
-    });
+    const rights = rightsRows.map((r: any) => r.rightCode ?? r.rightcode);
+    results.push(mapUserAccountRow(u, rights));
   }
 
   return results;
@@ -492,7 +500,8 @@ export async function toggleBlockUser(userId: string, updatedBy = 'Admin'): Prom
   if (!user) return { success: false, error: 'User not found' };
   if (user.role === 'Superadmin') return { success: false, error: 'Superadmin accounts cannot be blocked' };
 
-  const newBlocked = user.isBlocked ? 0 : 1;
+  const currentBlocked = user.isBlocked ?? user.isblocked;
+  const newBlocked = currentBlocked ? 0 : 1;
   const stamp = getStampString(newBlocked ? 'BLOCKED' : 'UNBLOCKED', updatedBy);
 
   await db.run(`
@@ -528,7 +537,7 @@ export async function getUserRights(userId: string): Promise<string[]> {
   await ensureAuthDb();
   const db = getHopeDb();
   const rows = await db.query<any>('SELECT rightCode FROM USERRIGHTS WHERE userId = ?', [userId]);
-  return rows.map((r) => r.rightCode);
+  return rows.map((r: any) => r.rightCode ?? r.rightcode);
 }
 
 export async function adminCreateUser(
@@ -655,25 +664,10 @@ export async function findAccountById(userId: string): Promise<UserAccount | und
     let rights: string[] = [];
     try {
       const rightsRows = await db.query<any>('SELECT rightCode FROM USERRIGHTS WHERE userId = ?', [user.userId]);
-      rights = rightsRows.map((r: any) => r.rightCode);
+      rights = rightsRows.map((r: any) => r.rightCode ?? r.rightcode);
     } catch {}
 
-    return {
-      userId: user.userId,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      fullName: `${user.firstName} ${user.lastName}`.trim(),
-      email: user.email,
-      passwordHash: user.passwordHash,
-      role: user.role,
-      isBlocked: Boolean(user.isBlocked),
-      status: user.status,
-      stamp: user.stamp,
-      createdAt: user.createdAt,
-      rights,
-      mustChangePassword: Boolean(user.mustChangePassword),
-      sessionVersion: user.sessionVersion ?? 1,
-    };
+    return mapUserAccountRow(user, rights);
   } catch (err: any) {
     console.warn('[auth-db] findAccountById warning:', err?.message);
     return undefined;
