@@ -277,6 +277,15 @@ export function adaptSqlForPostgres(sql: string): string {
   // Convert '= LOWER(?)' to '= ?' to avoid PostgreSQL function lower(unknown) parameter type error
   s = s.replace(/=\s*LOWER\s*\(\s*\?\s*\)/gi, '= ?');
 
+  // Convert boolean column comparisons for PostgreSQL
+  s = s.replace(/(\b[a-zA-Z0-9_]+\.)?is_deleted\s*=\s*0\b/gi, (_, p) => (p || '') + 'is_deleted = false');
+  s = s.replace(/(\b[a-zA-Z0-9_]+\.)?is_deleted\s*=\s*1\b/gi, (_, p) => (p || '') + 'is_deleted = true');
+  s = s.replace(/(\b[a-zA-Z0-9_]+\.)?is_deleted\s*(!=|<>)(\s*)0\b/gi, (_, p) => (p || '') + 'is_deleted = true');
+  s = s.replace(/(\b[a-zA-Z0-9_]+\.)?is_deleted\s*(!=|<>)(\s*)1\b/gi, (_, p) => (p || '') + 'is_deleted = false');
+
+  // Convert SQLite date('now') to CURRENT_DATE
+  s = s.replace(/date\s*\(\s*'now'\s*\)/gi, 'CURRENT_DATE');
+
   return convertSqlPlaceholders(s);
 }
 
