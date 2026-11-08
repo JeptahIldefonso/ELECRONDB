@@ -293,7 +293,8 @@ export function getHopeDb(): HopeDatabase {
 
   if (hasPostgres) {
     if (!globalThis._hopePgPool) {
-      const connStr = process.env.DATABASE_URL!.trim();
+      const rawConnStr = process.env.DATABASE_URL!.trim();
+      const connStr = rawConnStr.replace(/[?&]sslmode=[^&]+/i, '');
       globalThis._hopePgPool = new Pool({
         connectionString: connStr,
         ssl: {

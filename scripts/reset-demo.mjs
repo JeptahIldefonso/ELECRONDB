@@ -67,8 +67,9 @@ const CANONICAL_RIGHTS = [
 
 async function resetPostgres(databaseUrl) {
   console.log('[RESET] Connecting to PostgreSQL via DATABASE_URL...');
+  const cleanUrl = databaseUrl.replace(/[?&]sslmode=[^&]+/i, '');
   const pool = new Pool({
-    connectionString: databaseUrl,
+    connectionString: cleanUrl,
     ssl: { rejectUnauthorized: false },
     connectionTimeoutMillis: 10000,
   });
