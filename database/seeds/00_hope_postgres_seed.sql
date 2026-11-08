@@ -1580,3 +1580,100 @@ BEGIN
     RETURN result;
 END;
 $$;
+
+
+-- 12. User Management & Access Control Tables (Student Guide §2.4)
+CREATE TABLE IF NOT EXISTS users (
+    userId TEXT PRIMARY KEY,
+    firstName TEXT NOT NULL,
+    lastName TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    passwordHash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('Superadmin', 'Admin', 'User')),
+    isBlocked INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active', 'Inactive')),
+    stamp TEXT NOT NULL,
+    createdAt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    mustChangePassword INTEGER NOT NULL DEFAULT 0,
+    sessionVersion INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS rights (
+    rightCode TEXT PRIMARY KEY,
+    module TEXT NOT NULL,
+    description TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS userrights (
+    userId TEXT NOT NULL REFERENCES users(userId) ON DELETE CASCADE,
+    rightCode TEXT NOT NULL REFERENCES rights(rightCode) ON DELETE CASCADE,
+    PRIMARY KEY (userId, rightCode)
+);
+
+CREATE TABLE IF NOT EXISTS staff_accounts (
+    id SERIAL PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    passwordHash TEXT NOT NULL,
+    fullName TEXT NOT NULL,
+    role TEXT NOT NULL,
+    createdAt TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Seed Canonical Rights (21 rights)
+INSERT INTO rights (rightCode, module, description) VALUES
+('add_customer', 'Customer', 'Add new customers'),
+('edit_customer', 'Customer', 'Update customer details'),
+('add_product', 'Products', 'Add new catalog products'),
+('edit_product', 'Products', 'Update catalog products'),
+('add_price', 'Products', 'Set product prices'),
+('edit_price', 'Products', 'Revise product prices'),
+('add_sale', 'Sales', 'Create new sales transactions'),
+('edit_sale', 'Sales', 'Update sales headers'),
+('view_sale_details', 'Sales', 'View line item details'),
+('add_sale_detail', 'Sales', 'Add sale line items'),
+('edit_sale_detail', 'Sales', 'Update sale line items'),
+('add_employee', 'Human Resources', 'Add new staff members'),
+('edit_employee', 'Human Resources', 'Update staff details'),
+('view_job_history', 'Human Resources', 'View employee job assignments'),
+('report_top_customers', 'Reports', 'Run Top Customers Report'),
+('report_product_master', 'Reports', 'Run Product Master Report'),
+('report_top_products', 'Reports', 'Run Top Products Report'),
+('report_active_employees', 'Reports', 'Run Active Employees Report'),
+('report_all_employees', 'Reports', 'Run All Employees Report'),
+('report_employee_job_history', 'Reports', 'Run Job History Report'),
+('report_top_sales', 'Reports', 'Run Top Sales Transactions Report')
+ON CONFLICT (rightCode) DO NOTHING;
+
+-- Seed Demo Accounts
+INSERT INTO users (userId, firstName, lastName, email, passwordHash, role, isBlocked, status, stamp, mustChangePassword, sessionVersion) VALUES
+('usr-superadmin', 'Hope', 'Superadmin', 'superadmin@hope.com', '$2b$10$GxmmmTkRF/K6TLzySKb.Ce1Ahif/TYnUalUtzW4mnXuM8aNvCrjmy', 'Superadmin', 0, 'Active', 'SEEDED system', 0, 1),
+('usr-admin1', 'Admin', 'One', 'admin1@gmail.com', '$2b$10$GxmmmTkRF/K6TLzySKb.Ce1Ahif/TYnUalUtzW4mnXuM8aNvCrjmy', 'Admin', 0, 'Active', 'SEEDED system', 0, 1),
+('usr-admin2', 'Admin', 'Two', 'admin2@gmail.com', '$2b$10$GxmmmTkRF/K6TLzySKb.Ce1Ahif/TYnUalUtzW4mnXuM8aNvCrjmy', 'Admin', 0, 'Active', 'SEEDED system', 0, 1),
+('usr-user1', 'Standard', 'User', 'user1@gmail.com', '$2b$10$DNHYtIlL7PuNo5k37MNLs.UZli/mv0F5ihx5ATGJIsT20yTAwGsWu', 'User', 0, 'Active', 'SEEDED system', 0, 1)
+ON CONFLICT (userId) DO UPDATE SET passwordHash = EXCLUDED.passwordHash;
+
+-- Seed User Rights for Demo Accounts
+INSERT INTO userrights (userId, rightCode)
+SELECT 'usr-superadmin', rightCode FROM rights
+ON CONFLICT (userId, rightCode) DO NOTHING;
+
+INSERT INTO userrights (userId, rightCode)
+SELECT 'usr-admin1', rightCode FROM rights
+ON CONFLICT (userId, rightCode) DO NOTHING;
+
+INSERT INTO userrights (userId, rightCode)
+SELECT 'usr-admin2', rightCode FROM rights
+ON CONFLICT (userId, rightCode) DO NOTHING;
+
+INSERT INTO userrights (userId, rightCode) VALUES
+('usr-user1', 'add_customer'),
+('usr-user1', 'edit_customer'),
+('usr-user1', 'add_product'),
+('usr-user1', 'edit_product'),
+('usr-user1', 'add_sale'),
+('usr-user1', 'view_sale_details'),
+('usr-user1', 'report_top_customers'),
+('usr-user1', 'report_product_master'),
+('usr-user1', 'report_top_products'),
+('usr-user1', 'report_top_sales')
+ON CONFLICT (userId, rightCode) DO NOTHING;

@@ -53,68 +53,118 @@ export async function ensureAuthDb(): Promise<void> {
   const db = getHopeDb();
 
   try {
-    // 1. Proposed USERS Table (Guide §2.4)
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS USERS (
-        userId TEXT PRIMARY KEY,
-        firstName TEXT NOT NULL,
-        lastName TEXT NOT NULL,
-        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-        passwordHash TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('Superadmin', 'Admin', 'User')),
-        isBlocked INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active', 'Inactive')),
-        stamp TEXT NOT NULL,
-        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
-        mustChangePassword INTEGER NOT NULL DEFAULT 0,
-        sessionVersion INTEGER NOT NULL DEFAULT 1
-      );
-    `);
+    if (db.engine === 'postgres') {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS USERS (
+          userId TEXT PRIMARY KEY,
+          firstName TEXT NOT NULL,
+          lastName TEXT NOT NULL,
+          email TEXT NOT NULL UNIQUE,
+          passwordHash TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('Superadmin', 'Admin', 'User')),
+          isBlocked INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active', 'Inactive')),
+          stamp TEXT NOT NULL,
+          createdAt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          mustChangePassword INTEGER NOT NULL DEFAULT 0,
+          sessionVersion INTEGER NOT NULL DEFAULT 1
+        );
+      `);
 
-    // 2. Proposed RIGHTS Table (Guide §2.4 - 36 canonical rights)
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS RIGHTS (
-        rightCode TEXT PRIMARY KEY,
-        module TEXT NOT NULL,
-        description TEXT NOT NULL
-      );
-    `);
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS RIGHTS (
+          rightCode TEXT PRIMARY KEY,
+          module TEXT NOT NULL,
+          description TEXT NOT NULL
+        );
+      `);
 
-    // 3. Proposed USERRIGHTS Junction Table (Guide §2.4)
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS USERRIGHTS (
-        userId TEXT NOT NULL,
-        rightCode TEXT NOT NULL,
-        PRIMARY KEY (userId, rightCode),
-        FOREIGN KEY (userId) REFERENCES USERS(userId) ON DELETE CASCADE,
-        FOREIGN KEY (rightCode) REFERENCES RIGHTS(rightCode) ON DELETE CASCADE
-      );
-    `);
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS USERRIGHTS (
+          userId TEXT NOT NULL REFERENCES USERS(userId) ON DELETE CASCADE,
+          rightCode TEXT NOT NULL REFERENCES RIGHTS(rightCode) ON DELETE CASCADE,
+          PRIMARY KEY (userId, rightCode)
+        );
+      `);
 
-    // Legacy table support if it was already created
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS staff_accounts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-        passwordHash TEXT NOT NULL,
-        fullName TEXT NOT NULL,
-        role TEXT NOT NULL,
-        createdAt TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-    `);
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS staff_accounts (
+          id SERIAL PRIMARY KEY,
+          email TEXT NOT NULL UNIQUE,
+          passwordHash TEXT NOT NULL,
+          fullName TEXT NOT NULL,
+          role TEXT NOT NULL,
+          createdAt TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
 
-    // Guarded idempotent column migration for mustChangePassword and sessionVersion
-    try {
-      const userColumns = await db.query<any>('PRAGMA table_info(USERS)');
-      const colNames = userColumns.map((c: any) => c.name);
-      if (!colNames.includes('mustChangePassword')) {
-        await db.exec('ALTER TABLE USERS ADD COLUMN mustChangePassword INTEGER NOT NULL DEFAULT 0;');
+      try {
+        await db.exec(`
+          ALTER TABLE USERS ADD COLUMN IF NOT EXISTS mustChangePassword INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE USERS ADD COLUMN IF NOT EXISTS sessionVersion INTEGER NOT NULL DEFAULT 1;
+        `);
+      } catch (colErr: any) {
+        console.warn('[auth-db] Postgres column check note:', colErr?.message);
       }
-      if (!colNames.includes('sessionVersion')) {
-        await db.exec('ALTER TABLE USERS ADD COLUMN sessionVersion INTEGER NOT NULL DEFAULT 1;');
+    } else {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS USERS (
+          userId TEXT PRIMARY KEY,
+          firstName TEXT NOT NULL,
+          lastName TEXT NOT NULL,
+          email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          passwordHash TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('Superadmin', 'Admin', 'User')),
+          isBlocked INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'Active' CHECK(status IN ('Active', 'Inactive')),
+          stamp TEXT NOT NULL,
+          createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+          mustChangePassword INTEGER NOT NULL DEFAULT 0,
+          sessionVersion INTEGER NOT NULL DEFAULT 1
+        );
+      `);
+
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS RIGHTS (
+          rightCode TEXT PRIMARY KEY,
+          module TEXT NOT NULL,
+          description TEXT NOT NULL
+        );
+      `);
+
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS USERRIGHTS (
+          userId TEXT NOT NULL,
+          rightCode TEXT NOT NULL,
+          PRIMARY KEY (userId, rightCode),
+          FOREIGN KEY (userId) REFERENCES USERS(userId) ON DELETE CASCADE,
+          FOREIGN KEY (rightCode) REFERENCES RIGHTS(rightCode) ON DELETE CASCADE
+        );
+      `);
+
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS staff_accounts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          passwordHash TEXT NOT NULL,
+          fullName TEXT NOT NULL,
+          role TEXT NOT NULL,
+          createdAt TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+
+      try {
+        const userColumns = await db.query<any>('PRAGMA table_info(USERS)');
+        const colNames = userColumns.map((c: any) => c.name);
+        if (!colNames.includes('mustChangePassword')) {
+          await db.exec('ALTER TABLE USERS ADD COLUMN mustChangePassword INTEGER NOT NULL DEFAULT 0;');
+        }
+        if (!colNames.includes('sessionVersion')) {
+          await db.exec('ALTER TABLE USERS ADD COLUMN sessionVersion INTEGER NOT NULL DEFAULT 1;');
+        }
+      } catch (migErr: any) {
+        console.warn('[auth-db] Column migration note:', migErr?.message);
       }
-    } catch (migErr: any) {
-      console.warn('[auth-db] Column migration note:', migErr?.message);
     }
 
     // Populate RIGHTS table with the 36 canonical rights
@@ -186,6 +236,20 @@ export async function ensureAuthDb(): Promise<void> {
         explicitHash: envAdminHash,
         role: 'Superadmin',
         rights: CANONICAL_RIGHTS.map((r) => r.rightCode),
+      },
+      {
+        userId: 'usr-user1',
+        firstName: 'Standard',
+        lastName: 'User',
+        email: 'user1@gmail.com',
+        defaultPassword: 'useruser',
+        role: 'User',
+        rights: [
+          'add_customer', 'edit_customer',
+          'add_product', 'edit_product',
+          'add_sale', 'view_sale_details',
+          'report_top_customers', 'report_product_master', 'report_top_products', 'report_top_sales'
+        ],
       },
     ];
 

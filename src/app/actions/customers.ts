@@ -352,10 +352,11 @@ export async function recordCustomerPaymentAction(input: RecordPaymentInput) {
       return { error: `Transaction #${formattedTransNo} does not exist in Sales records (R-05).` };
     }
 
+    const stampStr = getStampString('CREATED', 'cashier');
     await db.run(`
       INSERT INTO PAYMENT (ORNo, payDate, amount, transNo, stamp)
-      VALUES (?, ?, ?, ?, 'ADD cashier ' || strftime('%Y-%m-%d %H:%M', 'now', '+8 hours'))
-    `, [formattedOrNo, validated.payDate, validated.amount, sale.transNo || formattedTransNo]);
+      VALUES (?, ?, ?, ?, ?)
+    `, [formattedOrNo, validated.payDate, validated.amount, sale.transNo || formattedTransNo, stampStr]);
 
     revalidatePath('/customers');
     return { success: true, orNo: formattedOrNo };

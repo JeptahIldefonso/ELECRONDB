@@ -1,6 +1,7 @@
 import os from 'node:os';
 import { createClient, type Client as LibSqlClient } from '@libsql/client';
 import { DatabaseSync } from 'node:sqlite';
+import { Pool, type PoolClient } from 'pg';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -34,14 +35,29 @@ export interface HopeDatabase {
   exec(sql: string): Promise<void>;
   batch(statements: Array<{ sql: string; args?: any[] } | string>): Promise<any[]>;
   isTurso: boolean;
+  isPostgres: boolean;
   isReadOnly: boolean;
-  engine: 'turso' | 'sqlite-local' | 'sqlite-bundled-readonly';
+  engine: 'postgres' | 'turso' | 'sqlite-local' | 'sqlite-bundled-readonly';
   client?: LibSqlClient;
+  pgPool?: Pool;
 }
 
 let syncDbInstance: DatabaseSync | null = null;
 let asyncDbInstance: HopeDatabase | null = null;
 let initPromise: Promise<string> | null = null;
+
+// Global singleton for PostgreSQL pool to survive hot-reloads and warm serverless containers
+declare global {
+  // eslint-disable-next-line no-var
+  var _hopePgPool: Pool | undefined;
+}
+
+/**
+ * Returns true if PostgreSQL connection string (DATABASE_URL) is configured.
+ */
+export function isPostgresConfigured(): boolean {
+  return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
+}
 
 /**
  * Returns true if Turso cloud database credentials are provided via environment variables.
@@ -52,12 +68,13 @@ export function isTursoConfigured(): boolean {
 
 /**
  * Returns true if the environment enforces read-only mode:
- * - On Vercel: True ONLY if Turso credentials are NOT configured.
- *   If Turso is configured on Vercel, the app runs in full persistent read-write mode.
+ * - With PostgreSQL (DATABASE_URL): Always read-write (false).
+ * - With Turso: Always read-write (false).
  * - Locally: False (always read-write via hope.work.db).
+ * - On Vercel without external DB: Read-only fallback.
  */
 export function isDatabaseReadOnly(): boolean {
-  if (isTursoConfigured()) {
+  if (isPostgresConfigured() || isTursoConfigured()) {
     return false;
   }
   try {
@@ -95,12 +112,9 @@ export function getMasterDbPath(): string {
 
 /**
  * Resolves the database path to use for local queries and transactions.
- * - On Vercel (without Turso): Returns the bundled read-only hope.db path.
- * - Locally: Ensures a local working copy (hope.work.db) exists (seeded from hope.db),
- *   protecting the committed master hope.db from any mutations.
  */
 export function getHopeDbPath(): string {
-  if (isTursoConfigured()) {
+  if (isPostgresConfigured() || isTursoConfigured()) {
     return getMasterDbPath();
   }
 
@@ -147,6 +161,12 @@ export function closeHopeDb(): void {
     } catch {}
     syncDbInstance = null;
   }
+  if (globalThis._hopePgPool) {
+    try {
+      globalThis._hopePgPool.end();
+    } catch {}
+    globalThis._hopePgPool = undefined;
+  }
   asyncDbInstance = null;
 }
 
@@ -180,16 +200,175 @@ export function getHopeDbSync(): DatabaseSync {
 }
 
 /**
+ * Converts positional '?' parameter markers into Postgres-style '$1, $2, ...'
+ * markers, safely ignoring '?' characters inside single-quoted strings or comments.
+ */
+export function convertSqlPlaceholders(sql: string): string {
+  let paramIndex = 1;
+  let inString = false;
+  let inComment = false;
+  let inLineComment = false;
+  let result = '';
+
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (inString) {
+      result += ch;
+      if (ch === "'") {
+        if (next === "'") {
+          result += next;
+          i++;
+        } else {
+          inString = false;
+        }
+      }
+    } else if (inLineComment) {
+      result += ch;
+      if (ch === '\n') {
+        inLineComment = false;
+      }
+    } else if (inComment) {
+      result += ch;
+      if (ch === '*' && next === '/') {
+        result += next;
+        i++;
+        inComment = false;
+      }
+    } else {
+      if (ch === "'") {
+        inString = true;
+        result += ch;
+      } else if (ch === '-' && next === '-') {
+        inLineComment = true;
+        result += ch + next;
+        i++;
+      } else if (ch === '/' && next === '*') {
+        inComment = true;
+        result += ch + next;
+        i++;
+      } else if (ch === '?') {
+        result += `$${paramIndex++}`;
+      } else {
+        result += ch;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Dialect adapter for SQL queries targeting PostgreSQL.
+ * Handles 'INSERT OR IGNORE INTO' -> 'INSERT INTO ... ON CONFLICT DO NOTHING'.
+ */
+export function adaptSqlForPostgres(sql: string): string {
+  let s = sql.trim();
+
+  // Convert INSERT OR IGNORE INTO ...
+  if (/^INSERT\s+OR\s+IGNORE\s+INTO\s+/i.test(s)) {
+    s = s.replace(/^INSERT\s+OR\s+IGNORE\s+INTO\s+/i, 'INSERT INTO ');
+    if (!/ON\s+CONFLICT/i.test(s)) {
+      s = s.replace(/;?\s*$/, '') + ' ON CONFLICT DO NOTHING';
+    }
+  }
+
+  return convertSqlPlaceholders(s);
+}
+
+/**
  * Main unified database accessor for HopeERD.
+ * - In Production with PostgreSQL (DATABASE_URL): Connects via persistent pg.Pool.
  * - In Production with Turso (TURSO_DATABASE_URL): Connects over HTTPS/WebSocket to Turso.
  * - In Local Development: Connects to local hope.work.db via @libsql/client file protocol.
- * - On Vercel fallback (missing Turso env): Connects read-only to bundled seed.
+ * - On Vercel fallback (missing external DB): Connects read-only to bundled seed.
  */
 export function getHopeDb(): HopeDatabase {
   if (asyncDbInstance) return asyncDbInstance;
 
+  const hasPostgres = isPostgresConfigured();
   const hasTurso = isTursoConfigured();
   const isReadOnly = isDatabaseReadOnly();
+
+  if (hasPostgres) {
+    if (!globalThis._hopePgPool) {
+      const connStr = process.env.DATABASE_URL!.trim();
+      globalThis._hopePgPool = new Pool({
+        connectionString: connStr,
+        ssl: {
+          rejectUnauthorized: false,
+        },
+        max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+      });
+
+      globalThis._hopePgPool.on('error', (err) => {
+        console.error('[hope-db] Unexpected error on idle Postgres client:', err);
+      });
+    }
+
+    const pool = globalThis._hopePgPool;
+
+    asyncDbInstance = {
+      isTurso: false,
+      isPostgres: true,
+      isReadOnly: false,
+      engine: 'postgres',
+      pgPool: pool,
+
+      async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+        const adapted = adaptSqlForPostgres(sql);
+        const res = await pool.query(adapted, params || []);
+        return res.rows as T[];
+      },
+
+      async get<T = any>(sql: string, params?: any[]): Promise<T | null> {
+        const adapted = adaptSqlForPostgres(sql);
+        const res = await pool.query(adapted, params || []);
+        return (res.rows[0] as T) || null;
+      },
+
+      async run(sql: string, params?: any[]): Promise<{ changes: number; lastInsertRowid: number | bigint }> {
+        const adapted = adaptSqlForPostgres(sql);
+        const res = await pool.query(adapted, params || []);
+        return {
+          changes: res.rowCount ?? 0,
+          lastInsertRowid: 0,
+        };
+      },
+
+      async exec(sql: string): Promise<void> {
+        await pool.query(sql);
+      },
+
+      async batch(statements: Array<{ sql: string; args?: any[] } | string>): Promise<any[]> {
+        const client: PoolClient = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          const results = [];
+          for (const stmt of statements) {
+            if (typeof stmt === 'string') {
+              results.push(await client.query(stmt));
+            } else {
+              const adapted = adaptSqlForPostgres(stmt.sql);
+              results.push(await client.query(adapted, stmt.args || []));
+            }
+          }
+          await client.query('COMMIT');
+          return results;
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+      },
+    };
+
+    return asyncDbInstance;
+  }
 
   let client: LibSqlClient;
   let engineType: 'turso' | 'sqlite-local' | 'sqlite-bundled-readonly' = 'sqlite-local';
@@ -210,6 +389,7 @@ export function getHopeDb(): HopeDatabase {
 
   asyncDbInstance = {
     isTurso: hasTurso,
+    isPostgres: false,
     isReadOnly,
     engine: engineType,
     client,
@@ -248,7 +428,7 @@ export function getHopeDb(): HopeDatabase {
 
 /**
  * Sanitizes raw database and engine errors into polished, human-friendly messages.
- * Guarantees zero internal SQLite/libSQL syntax or wording leaks into the user interface.
+ * Guarantees zero internal SQLite/Postgres/libSQL syntax or wording leaks into the user interface.
  */
 export function sanitizeDbError(err: any, fallbackMessage = 'Unable to complete operation. Please try again.'): string {
   if (!err) return fallbackMessage;
@@ -256,25 +436,24 @@ export function sanitizeDbError(err: any, fallbackMessage = 'Unable to complete 
   console.error('[Database Operation Error]:', err);
 
   const raw = typeof err === 'string' ? err : err?.message || '';
+  const code = err?.code || '';
 
-  // Read-only environment guard (Vercel without Turso or locked DB)
-  if (raw.includes('readonly') || raw.includes('READONLY') || raw.includes('read-only')) {
-    return 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso configured.';
-  }
-
-  // Foreign key constraint failure
-  if (raw.includes('FOREIGN KEY') || raw.includes('foreign key')) {
-    return 'Referential error: The selected customer, employee, department, or product does not exist.';
-  }
-
-  // Unique constraint failure
-  if (raw.includes('UNIQUE') || raw.includes('unique')) {
+  // PostgreSQL constraint error codes
+  if (code === '23505' || raw.includes('duplicate key value') || raw.includes('UNIQUE') || raw.includes('unique')) {
     return 'Duplicate entry: A record with this identifier already exists.';
   }
 
-  // Check constraint failure
-  if (raw.includes('CHECK constraint') || raw.includes('check constraint')) {
+  if (code === '23503' || raw.includes('foreign key constraint') || raw.includes('FOREIGN KEY')) {
+    return 'Referential error: The selected customer, employee, department, or product does not exist.';
+  }
+
+  if (code === '23514' || raw.includes('check constraint') || raw.includes('CHECK constraint')) {
     return 'Invalid data format or value exceeds allowed business limits.';
+  }
+
+  // Read-only environment guard (Vercel without Turso/Postgres or locked DB)
+  if (raw.includes('readonly') || raw.includes('READONLY') || raw.includes('read-only')) {
+    return 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso/Supabase configured.';
   }
 
   // Access control & rights
@@ -293,6 +472,7 @@ export function sanitizeDbError(err: any, fallbackMessage = 'Unable to complete 
     cleanMsg &&
     !cleanMsg.toLowerCase().includes('sqlite') &&
     !cleanMsg.toLowerCase().includes('libsql') &&
+    !cleanMsg.toLowerCase().includes('postgres') &&
     !cleanMsg.includes('prepare(') &&
     !cleanMsg.includes('syntax error')
   ) {
