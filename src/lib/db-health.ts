@@ -67,8 +67,9 @@ export async function checkDatabaseHealth(forceFresh = false): Promise<DbHealthR
       const db = getHopeDb();
 
       // Ping test
+      const pingStart = performance.now();
       await db.get('SELECT 1 as ping');
-      const latencyMs = Math.max(1, Math.round(performance.now() - startTime));
+      const latencyMs = Math.max(1, Math.round(performance.now() - pingStart));
 
       // Discover existing tables
       let masterTables: Array<{ name: string }> = [];
