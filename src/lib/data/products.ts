@@ -70,73 +70,6 @@ export async function getProductsPageData(): Promise<{
   metrics: ProductsMetrics;
   recentAudits: ProductAuditLogItem[];
 }> {
-  if (isSupabaseLive()) {
-    try {
-      const supabase = await createClient();
-      const [prodsRes, pricesRes] = await Promise.all([
-        supabase.from('PRODUCT').select('*').order('prodCode', { ascending: true }),
-        supabase.from('PRICEHIST').select('*').order('effDate', { ascending: false }),
-      ]);
-
-      if (!prodsRes.error && prodsRes.data) {
-        const rawPrices: PriceRecordItem[] = (pricesRes.data || []).map((p: any) => ({
-          effDate: String(p.effDate),
-          prodCode: String(p.prodCode),
-          unitPrice: Number(p.unitPrice),
-          isDeleted: Boolean(p.is_deleted === 1 || p.is_deleted === true || p.is_deleted === '1'),
-          status: (p.is_deleted === 1 || p.is_deleted === true || p.is_deleted === '1') ? 'Inactive' : 'Active',
-          stamp: p.stamp ? String(p.stamp) : null,
-        }));
-
-        const todayManila = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
-
-        const products: ProductItem[] = prodsRes.data.map((r: any) => {
-          const isDeleted = Boolean(r.is_deleted === 1 || r.is_deleted === true || r.is_deleted === '1');
-          const pPrices = rawPrices.filter((ph) => ph.prodCode === r.prodCode && !ph.isDeleted && ph.effDate <= todayManila);
-          pPrices.sort((a, b) => b.effDate.localeCompare(a.effDate));
-          const currentRec = isDeleted ? null : pPrices[0];
-
-          return {
-            prodCode: String(r.prodCode),
-            description: String(r.description || ''),
-            unit: String(r.unit || 'pc'),
-            currentPrice: currentRec ? currentRec.unitPrice : null,
-            currentPriceEffDate: currentRec ? currentRec.effDate : null,
-            priceCount: rawPrices.filter((ph) => ph.prodCode === r.prodCode).length,
-            isDeleted,
-            status: isDeleted ? 'Inactive' : 'Active',
-            stamp: r.stamp ? String(r.stamp) : null,
-          };
-        });
-
-        const activeCount = products.filter((p) => !p.isDeleted).length;
-        const inactiveCount = products.filter((p) => p.isDeleted).length;
-
-        const unitCounts: Record<string, number> = {};
-        for (const p of products) {
-          unitCounts[p.unit] = (unitCounts[p.unit] || 0) + 1;
-        }
-
-        return {
-          products,
-          priceHistory: rawPrices,
-          metrics: {
-            totalProducts: products.length,
-            activeCount,
-            inactiveCount,
-            totalPriceRecords: rawPrices.length,
-            unitCounts,
-            nextSuggestedProdCode: `P-${String(products.length + 1).padStart(3, '0')}`,
-          },
-          recentAudits: [],
-        };
-      }
-    } catch {
-      // Fallback to SQLite
-    }
-  }
-
-  // SQLite implementation
   const db = getSqliteDb();
 
   const prodRows = await db.query(`
@@ -150,7 +83,7 @@ export async function getProductsPageData(): Promise<{
         SELECT ph.unitPrice 
         FROM PRICEHIST ph 
         WHERE ph.prodCode = p.prodCode 
-          AND ph.effDate <= date('now', '+8 hours')
+          AND ph.effDate <= CURRENT_DATE
           AND ph.is_deleted = 0
         ORDER BY ph.effDate DESC 
         LIMIT 1
@@ -159,7 +92,7 @@ export async function getProductsPageData(): Promise<{
         SELECT ph.effDate 
         FROM PRICEHIST ph 
         WHERE ph.prodCode = p.prodCode 
-          AND ph.effDate <= date('now', '+8 hours')
+          AND ph.effDate <= CURRENT_DATE
           AND ph.is_deleted = 0
         ORDER BY ph.effDate DESC 
         LIMIT 1
@@ -179,28 +112,34 @@ export async function getProductsPageData(): Promise<{
     ORDER BY effDate DESC, prodCode ASC
   `);
 
-  const priceHistory: PriceRecordItem[] = priceRows.map((r) => {
+  const priceHistory: PriceRecordItem[] = priceRows.map((r: any) => {
     const isDeleted = Boolean(r.is_deleted === 1 || r.is_deleted === true || r.is_deleted === '1');
+    const rawEff = r.effDate ?? r.effdate;
+    const effDateStr = rawEff instanceof Date ? rawEff.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' }) : String(rawEff || '');
     return {
-      effDate: String(r.effDate),
-      prodCode: String(r.prodCode),
-      unitPrice: Number(r.unitPrice),
+      effDate: effDateStr,
+      prodCode: String(r.prodCode ?? r.prodcode ?? ''),
+      unitPrice: Number(r.unitPrice ?? r.unitprice ?? 0),
       isDeleted,
       status: isDeleted ? 'Inactive' : 'Active',
       stamp: r.stamp ? String(r.stamp) : null,
     };
   });
 
-  const products: ProductItem[] = prodRows.map((r) => {
+  const products: ProductItem[] = prodRows.map((r: any) => {
     const isDeleted = Boolean(r.is_deleted === 1 || r.is_deleted === true || r.is_deleted === '1');
+    const rawEff = r.currentPriceEffDate ?? r.currentpriceeffdate;
+    const effDateStr = rawEff ? (rawEff instanceof Date ? rawEff.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' }) : String(rawEff)) : null;
+    const rawPrice = r.currentPrice ?? r.currentprice;
+    const currentPrice = rawPrice != null && rawPrice !== '' ? Number(rawPrice) : null;
+
     return {
-      prodCode: String(r.prodCode),
+      prodCode: String(r.prodCode ?? r.prodcode ?? ''),
       description: String(r.description || ''),
       unit: String(r.unit || 'pc'),
-      // If product is soft-deleted, current price is displayed as null ("—")
-      currentPrice: isDeleted ? null : (r.currentPrice != null ? Number(r.currentPrice) : null),
-      currentPriceEffDate: isDeleted ? null : (r.currentPriceEffDate ? String(r.currentPriceEffDate) : null),
-      priceCount: Number(r.priceCount || 0),
+      currentPrice: isDeleted ? null : currentPrice,
+      currentPriceEffDate: isDeleted ? null : effDateStr,
+      priceCount: Number(r.priceCount ?? r.pricecount ?? 0),
       isDeleted,
       status: isDeleted ? 'Inactive' : 'Active',
       stamp: r.stamp ? String(r.stamp) : null,
@@ -215,8 +154,6 @@ export async function getProductsPageData(): Promise<{
     unitCounts[p.unit] = (unitCounts[p.unit] || 0) + 1;
   }
 
-  // Calculate next suggested product code
-  // If codes are like P-001, find max. If AD0001, find next.
   let maxPNum = 0;
   for (const p of products) {
     const m = p.prodCode.match(/^P-?(\d+)$/i);
@@ -238,20 +175,17 @@ export async function getProductsPageData(): Promise<{
       ORDER BY audit_id DESC
       LIMIT 30
     `);
-
-    recentAudits = auditRows.map((a) => ({
-      auditId: Number(a.audit_id),
-      tableName: String(a.table_name),
-      action: a.action,
-      recordKey: String(a.record_key || ''),
-      oldValues: a.old_values ? String(a.old_values) : null,
-      newValues: a.new_values ? String(a.new_values) : null,
-      actionBy: String(a.action_by || 'system'),
-      actionAt: String(a.action_at || ''),
+    recentAudits = auditRows.map((r: any) => ({
+      auditId: Number(r.audit_id ?? r.auditid ?? 0),
+      tableName: String(r.table_name ?? r.tablename ?? 'PRODUCT'),
+      action: (r.action || 'EDIT') as any,
+      recordKey: String(r.record_key ?? r.recordkey ?? ''),
+      oldValues: r.old_values ?? r.oldvalues ?? null,
+      newValues: r.new_values ?? r.newvalues ?? null,
+      actionBy: String(r.action_by ?? r.actionby ?? 'system'),
+      actionAt: String(r.action_at ?? r.actionat ?? ''),
     }));
-  } catch {
-    // Audit table empty or optional
-  }
+  } catch {}
 
   return {
     products,
@@ -267,3 +201,5 @@ export async function getProductsPageData(): Promise<{
     recentAudits,
   };
 }
+
+

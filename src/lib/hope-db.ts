@@ -284,7 +284,7 @@ export function adaptSqlForPostgres(sql: string): string {
   s = s.replace(/(\b[a-zA-Z0-9_]+\.)?is_deleted\s*(!=|<>)(\s*)1\b/gi, (_, p) => (p || '') + 'is_deleted = false');
 
   // Convert SQLite date('now') to CURRENT_DATE
-  s = s.replace(/date\s*\(\s*'now'\s*\)/gi, 'CURRENT_DATE');
+  s = s.replace(/date\s*\(\s*'now'[^)]*\)/gi, 'CURRENT_DATE');
 
   return convertSqlPlaceholders(s);
 }
@@ -296,6 +296,92 @@ export function adaptSqlForPostgres(sql: string): string {
  * - In Local Development: Connects to local hope.work.db via @libsql/client file protocol.
  * - On Vercel fallback (missing external DB): Connects read-only to bundled seed.
  */
+
+const PG_COLUMN_MAP: Record<string, string> = {
+  custno: 'custNo',
+  custname: 'custName',
+  prodcode: 'prodCode',
+  unitprice: 'unitPrice',
+  effdate: 'effDate',
+  transno: 'transNo',
+  salesdate: 'salesDate',
+  totalamount: 'totalAmount',
+  empno: 'empNo',
+  firstname: 'firstName',
+  lastname: 'lastName',
+  birthdate: 'birthDate',
+  hiredate: 'hireDate',
+  sepdate: 'sepDate',
+  jobcode: 'jobCode',
+  jobdesc: 'jobDesc',
+  deptcode: 'deptCode',
+  deptname: 'deptName',
+  userid: 'userId',
+  passwordhash: 'passwordHash',
+  isblocked: 'isBlocked',
+  mustchangepassword: 'mustChangePassword',
+  sessionversion: 'sessionVersion',
+  createdat: 'createdAt',
+  fullname: 'fullName',
+  rightcode: 'rightCode',
+  auditid: 'auditId',
+  recordkey: 'recordKey',
+  oldvalues: 'oldValues',
+  newvalues: 'newValues',
+  actionby: 'actionBy',
+  actionat: 'actionAt',
+  currentprice: 'currentPrice',
+  currentpriceeffdate: 'currentPriceEffDate',
+  pricecount: 'priceCount',
+  totalsales: 'totalSales',
+  salesamount: 'salesAmount',
+  qtysold: 'qtySold',
+  linecount: 'lineCount',
+  computedtotal: 'computedTotal',
+  empname: 'empName',
+  itemcount: 'itemCount',
+  totalrev: 'totalRev',
+  totaltrans: 'totalTrans',
+  totalpaid: 'totalPaid',
+  totalemp: 'totalEmp',
+  orno: 'ORNo',
+  paydate: 'payDate',
+  currentjobcode: 'currentJobCode',
+  currentjobdesc: 'currentJobDesc',
+  currentdeptcode: 'currentDeptCode',
+  currentdeptname: 'currentDeptName',
+  currentsalary: 'currentSalary',
+  currenteffdate: 'currentEffDate',
+};
+
+export function normalizePgRow<T = any>(row: any): T {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+  const copy: any = { ...row };
+  for (const [key, value] of Object.entries(row)) {
+    const lower = key.toLowerCase();
+    const camel = PG_COLUMN_MAP[lower];
+    if (camel && !(camel in copy)) {
+      copy[camel] = value;
+    }
+  }
+  return new Proxy(copy, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string') {
+        if (prop in target) return target[prop];
+        const lower = prop.toLowerCase();
+        if (lower in target) return target[lower];
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+    has(target, prop) {
+      if (typeof prop === 'string') {
+        return prop in target || prop.toLowerCase() in target;
+      }
+      return Reflect.has(target, prop);
+    }
+  }) as T;
+}
+
 export function getHopeDb(): HopeDatabase {
   if (asyncDbInstance) return asyncDbInstance;
 
@@ -334,13 +420,13 @@ export function getHopeDb(): HopeDatabase {
       async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
         const adapted = adaptSqlForPostgres(sql);
         const res = await pool.query(adapted, params || []);
-        return res.rows as T[];
+        return res.rows.map(normalizePgRow) as T[];
       },
 
       async get<T = any>(sql: string, params?: any[]): Promise<T | null> {
         const adapted = adaptSqlForPostgres(sql);
         const res = await pool.query(adapted, params || []);
-        return (res.rows[0] as T) || null;
+        return res.rows[0] ? (normalizePgRow(res.rows[0]) as T) : null;
       },
 
       async run(sql: string, params?: any[]): Promise<{ changes: number; lastInsertRowid: number | bigint }> {

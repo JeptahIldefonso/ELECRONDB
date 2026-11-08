@@ -108,66 +108,6 @@ export async function getCustomersPageData(): Promise<{
   metrics: CustomerMetrics;
   recentAudits: CustomerAuditLogItem[];
 }> {
-  if (isSupabaseLive()) {
-    try {
-      const supabase = await createClient();
-      const { data, error } = await supabase
-        .from('CUSTOMER')
-        .select('custNo, custName, address, payterm, is_deleted, stamp')
-        .order('custNo', { ascending: true });
-
-      if (!error && data) {
-        const customers: CustomerItem[] = data.map((r: any) => {
-          const isDeleted = Boolean(r.is_deleted === 1 || r.is_deleted === true || r.is_deleted === '1');
-          return {
-            custNo: String(r.custNo),
-            custName: String(r.custName || ''),
-            address: String(r.address || ''),
-            payterm: String(r.payterm || 'COD'),
-            payTerms: String(r.payterm || 'COD'),
-            isDeleted,
-            status: isDeleted ? 'Inactive' : 'Active',
-            stamp: r.stamp ? String(r.stamp) : null,
-          };
-        });
-
-        let maxNum = 0;
-        for (const c of customers) {
-          const match = c.custNo.match(/^C(\d+)$/i);
-          if (match) {
-            const num = parseInt(match[1], 10);
-            if (!isNaN(num) && num > maxNum) maxNum = num;
-          }
-        }
-        const nextSuggestedCustNo = `C${String(maxNum > 0 ? maxNum + 1 : customers.length + 1).padStart(4, '0')}`;
-
-        const activeCount = customers.filter((c) => !c.isDeleted).length;
-        const inactiveCount = customers.filter((c) => c.isDeleted).length;
-
-        const termCounts: Record<string, number> = { ALL: customers.length, COD: 0, '30D': 0, '45D': 0 };
-        for (const c of customers) {
-          const t = c.payterm || 'COD';
-          termCounts[t] = (termCounts[t] || 0) + 1;
-        }
-
-        return {
-          customers,
-          metrics: {
-            totalCustomers: customers.length,
-            activeCount,
-            inactiveCount,
-            termCounts,
-            nextSuggestedCustNo,
-          },
-          recentAudits: [],
-        };
-      }
-    } catch {
-      // Fallback to SQLite
-    }
-  }
-
-  // SQLite implementation directly querying canonical CUSTOMER table
   const db = getHopeDb();
 
   const rows = await db.query(`
@@ -176,14 +116,18 @@ export async function getCustomersPageData(): Promise<{
     ORDER BY custNo ASC
   `);
 
-  const customers: CustomerItem[] = rows.map((r) => {
+  const customers: CustomerItem[] = rows.map((r: any) => {
     const isDeleted = Boolean(r.is_deleted === 1 || r.is_deleted === true || r.is_deleted === '1');
+    const custNo = r.custNo ?? r.custno ?? '';
+    const custName = r.custName ?? r.custname ?? '';
+    const address = r.address ?? '';
+    const payterm = r.payterm ?? 'COD';
     return {
-      custNo: String(r.custNo),
-      custName: String(r.custName || ''),
-      address: String(r.address || ''),
-      payterm: String(r.payterm || 'COD'),
-      payTerms: String(r.payterm || 'COD'),
+      custNo: String(custNo),
+      custName: String(custName),
+      address: String(address),
+      payterm: String(payterm),
+      payTerms: String(payterm),
       isDeleted,
       status: isDeleted ? 'Inactive' : 'Active',
       stamp: r.stamp ? String(r.stamp) : null,
@@ -212,25 +156,22 @@ export async function getCustomersPageData(): Promise<{
   let recentAudits: CustomerAuditLogItem[] = [];
   try {
     const auditRows = await db.query(`
-      SELECT audit_id, action, record_key, old_values, new_values, action_by, action_at
+      SELECT audit_id, table_name, action, record_key, old_values, new_values, action_by, action_at
       FROM audit_log
       WHERE table_name = 'CUSTOMER'
       ORDER BY audit_id DESC
-      LIMIT 20
+      LIMIT 30
     `);
-
-    recentAudits = auditRows.map((a) => ({
-      auditId: Number(a.audit_id),
-      action: a.action,
-      recordKey: String(a.record_key || ''),
-      oldValues: a.old_values ? String(a.old_values) : null,
-      newValues: a.new_values ? String(a.new_values) : null,
-      actionBy: String(a.action_by || 'system'),
-      actionAt: String(a.action_at || ''),
+    recentAudits = auditRows.map((r: any) => ({
+      auditId: Number(r.audit_id ?? r.auditid ?? 0),
+      action: (r.action || 'EDIT') as any,
+      recordKey: String(r.record_key ?? r.recordkey ?? ''),
+      oldValues: r.old_values ?? r.oldvalues ?? null,
+      newValues: r.new_values ?? r.newvalues ?? null,
+      actionBy: String(r.action_by ?? r.actionby ?? 'system'),
+      actionAt: String(r.action_at ?? r.actionat ?? ''),
     }));
-  } catch {
-    // Non-critical if audit table is empty
-  }
+  } catch {}
 
   return {
     customers,
@@ -244,3 +185,5 @@ export async function getCustomersPageData(): Promise<{
     recentAudits,
   };
 }
+
+

@@ -208,6 +208,67 @@ async function resetPostgres(databaseUrl) {
       }
     }
 
+    // Recreate views with unquoted columns for standard postgres access
+    await client.query(`
+      DROP VIEW IF EXISTS v_sales_with_dept CASCADE;
+      DROP VIEW IF EXISTS v_sales_summary CASCADE;
+      DROP VIEW IF EXISTS v_sale_lines CASCADE;
+
+      CREATE VIEW v_sale_lines AS
+      SELECT 
+          sd.transno AS transno,
+          s.salesdate AS salesdate,
+          sd.prodcode AS prodcode,
+          p.description,
+          p.unit,
+          sd.quantity,
+          COALESCE(ph.unitprice, 0.0) AS unitprice,
+          ph.effdate AS priceeffdate,
+          (sd.quantity * COALESCE(ph.unitprice, 0.0))::NUMERIC(14,2) AS lineamount
+      FROM salesdetail sd
+      JOIN sales s ON s.transno = sd.transno
+      JOIN product p ON p.prodcode = sd.prodcode
+      LEFT JOIN LATERAL (
+          SELECT ph1.unitprice, ph1.effdate
+          FROM pricehist ph1
+          WHERE ph1.prodcode = sd.prodcode AND ph1.effdate <= s.salesdate
+          ORDER BY ph1.effdate DESC
+          LIMIT 1
+      ) ph ON true;
+
+      CREATE VIEW v_sales_summary AS
+      SELECT 
+          s.transno AS transno,
+          s.salesdate AS salesdate,
+          c.custno AS custno,
+          c.custname AS custname,
+          c.address AS custaddress,
+          c.payterm AS payterms,
+          e.empno AS empno,
+          (e.firstname || ' ' || e.lastname) AS repname,
+          jh.deptcode AS deptcode,
+          d.deptname AS deptname,
+          COALESCE(COUNT(sd.prodcode), 0)::INT AS itemcount,
+          COALESCE(SUM(l.lineamount), 0.0)::NUMERIC(14,2) AS totalamount
+      FROM sales s
+      JOIN customer c ON c.custno = s.custno
+      JOIN employee e ON e.empno = s.empno
+      LEFT JOIN LATERAL (
+          SELECT jh1.deptcode
+          FROM jobhistory jh1
+          WHERE jh1.empno = s.empno AND jh1.effdate <= s.salesdate
+          ORDER BY jh1.effdate DESC
+          LIMIT 1
+      ) jh ON true
+      LEFT JOIN department d ON d.deptcode = jh.deptcode
+      LEFT JOIN salesdetail sd ON sd.transno = s.transno
+      LEFT JOIN v_sale_lines l ON l.transno = sd.transno AND l.prodcode = sd.prodcode
+      GROUP BY s.transno, s.salesdate, c.custno, c.custname, c.address, c.payterm, e.empno, e.firstname, e.lastname, jh.deptcode, d.deptname;
+
+      CREATE VIEW v_sales_with_dept AS
+      SELECT * FROM v_sales_summary;
+    `);
+
     // Parity Gate & Row Count Check
     console.log('\n====================================================');
     console.log(' HOPE, INC. ERP — CANONICAL PARITY GATE VERIFICATION');
