@@ -1,92 +1,100 @@
-'use client';
-
-import React, { useState } from 'react';
+import React from 'react';
 import Link from 'next/link';
-import { ArrowLeft, CheckCircle2 } from 'lucide-react';
+import Image from 'next/image';
+import { ArrowLeft, KeyRound, ShieldAlert } from 'lucide-react';
+import { TopographicCanvas } from '@/components/ambient/TopographicCanvas';
+
+export const metadata = {
+  title: 'Forgot Password | ElectronDB ERP',
+  description: 'Password recovery information for ElectronDB ERP.',
+};
 
 export default function ForgotPasswordPage() {
-  const [email, setEmail] = useState('');
-  const [submitted, setSubmitted] = useState(false);
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (email.trim()) {
-      setSubmitted(true);
-    }
-  };
-
   return (
-    <div className="min-h-screen bg-[#F4F4F0] dark:bg-[#0C121E] text-[#041a24] dark:text-[#E2E8F0] font-sans flex flex-col items-center justify-center p-4">
-      {/* Container (Matching Figure 5) */}
-      <div className="w-full max-w-md bg-white dark:bg-[#111A2E] border border-black/10 dark:border-white/10 rounded-[6px] shadow-sm p-6 sm:p-8 space-y-6">
-        <div className="flex items-center justify-between border-b border-black/5 dark:border-white/5 pb-3">
-          <div>
-            <h1 className="font-editorial text-2xl font-normal text-[#041a24] dark:text-white">
-              Reset password
+    <div className="relative min-h-screen flex flex-col justify-between bg-[#F4F4F0] text-[#041a24] selection:bg-[#041a24] selection:text-white overflow-x-hidden font-sans transition-colors duration-150">
+      <TopographicCanvas />
+
+      {/* Brand Header */}
+      <header className="relative z-10 w-full max-w-5xl mx-auto px-6 pt-8 pb-4 flex items-center justify-between">
+        <Link
+          href="/login"
+          className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[#41555e] hover:text-[#041a25] transition-colors"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span>Back to Sign In</span>
+        </Link>
+
+        {/* Artistic ElectronDB Brand Mark & Wordmark */}
+        <div className="flex items-center gap-2.5">
+          <div className="relative w-8 h-8 shrink-0 rounded-md overflow-hidden border border-black/10 dark:border-white/10 shadow-2xs bg-white">
+            <Image
+              src="/logo.jpg"
+              alt="ElectronDB Logo"
+              fill
+              sizes="32px"
+              className="object-cover"
+              priority
+            />
+          </div>
+          <div className="flex flex-col leading-none">
+            <span className="font-editorial italic text-xl font-normal tracking-tight text-[#041a25]">
+              ElectronDB
+            </span>
+            <span className="font-mono text-[9px] uppercase tracking-widest text-[#41555f]/80">
+              HOPE ERP System
+            </span>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Notice Card */}
+      <main className="relative z-10 w-full max-w-md mx-auto px-6 py-12 flex-1 flex flex-col justify-center">
+        <div className="bg-[#FAF9F5] border border-black/10 rounded-lg p-6 sm:p-8 shadow-xs space-y-6">
+          <div className="space-y-2">
+            <div className="w-9 h-9 rounded bg-[#041a24]/5 border border-[#041a24]/10 flex items-center justify-center text-[#041a24] mb-3">
+              <KeyRound className="w-4 h-4" />
+            </div>
+            <h1 className="font-editorial text-2xl font-normal tracking-tight text-[#041a25]">
+              Forgot Password
             </h1>
-            <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mt-1">
-              We&apos;ll send you a secure link to reset it
+            <p className="font-sans text-xs text-[#41555f] leading-relaxed">
+              Staff and operational user accounts are securely managed by your organization&apos;s administrators.
             </p>
           </div>
-          <Link href="/login" className="text-xs text-[#64748B] hover:text-[#041a24] dark:hover:text-white">
-            &times;
-          </Link>
-        </div>
 
-        {submitted ? (
-          <div className="p-4 rounded bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 space-y-2">
-            <div className="flex items-center gap-2 font-medium text-xs">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-              Reset link sent!
-            </div>
-            <p className="text-[11px] leading-relaxed text-emerald-700 dark:text-emerald-400">
-              A secure password reset link has been dispatched to <strong>{email}</strong>. Check your inbox to proceed.
-            </p>
-            <div className="pt-2">
-              <Link
-                href="/login"
-                className="text-xs font-semibold underline hover:no-underline"
-              >
-                Back to Sign In
-              </Link>
-            </div>
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 rounded-[4px] text-xs text-amber-900 leading-relaxed flex items-start gap-2.5">
+            <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
             <div>
-              <label htmlFor="email" className="block text-xs font-medium text-[#475569] dark:text-[#94A3B8] mb-1.5">
-                Email address
-              </label>
-              <input
-                id="email"
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="jcesperanza@neu.edu.ph"
-                className="w-full h-10 px-3 text-xs rounded border border-black/15 dark:border-white/15 bg-white dark:bg-black/20 text-[#041a24] dark:text-white focus:outline-none focus:border-[#1D4ED8]"
-              />
+              <p className="font-medium text-[11px] uppercase tracking-wider text-amber-800 font-mono mb-1">
+                Notice
+              </p>
+              <p>
+                Contact your administrator to reset your password. An administrator can issue a secure temporary password from the User Management console.
+              </p>
             </div>
+          </div>
 
-            <button
-              type="submit"
-              className="w-full h-10 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-xs font-semibold shadow-xs transition-all cursor-pointer"
+          <div className="pt-2">
+            <Link
+              href="/login"
+              className="w-full h-9 bg-[#041a24] hover:bg-[#1c313b] active:bg-black text-white font-medium text-xs rounded-[3px] shadow-2xs flex items-center justify-center gap-2 transition-colors cursor-pointer border border-[#041a24]"
             >
-              Send Reset Link
-            </button>
-          </form>
-        )}
-
-        <div className="text-center pt-2">
-          <Link
-            href="/login"
-            className="inline-flex items-center gap-1.5 text-xs text-[#64748B] dark:text-[#94A3B8] hover:text-[#041a24] dark:hover:text-white"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            Remember your password? Back to Sign In
-          </Link>
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Return to Sign In</span>
+            </Link>
+          </div>
         </div>
-      </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="relative z-10 w-full max-w-5xl mx-auto px-6 py-6 flex flex-col sm:flex-row items-center justify-between text-xs text-[#41555f]/80 gap-2 border-t border-black/5">
+        <div className="font-editorial text-sm text-[#041a24]">
+          Hope, Inc. ERP
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-wider text-[#41555f]/60">
+          Administrator-Managed Password Recovery
+        </div>
+      </footer>
     </div>
   );
 }

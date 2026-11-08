@@ -6,7 +6,6 @@
 export type ModuleName =
   | 'sales'
   | 'customer'
-  | 'payments'
   | 'products'
   | 'human-resources'
   | 'reports'
@@ -25,10 +24,7 @@ export function normalizeRole(role?: string | null): NormalizedRole {
 }
 
 /**
- * Mapping of canonical 36 rights to their respective modules.
- * Note: Payments has no standalone rights of its own; official receipts are generated
- * against sales transactions, so holding 'view_sale_details' grants access to both
- * Sales and Payments ledger routes (/payments, /payments/[orNo], /receipts/[orNo]).
+ * Mapping of canonical 36 rights to their respective modules (Hope, Inc. ERP — Section 3.8).
  */
 export const MODULE_RIGHTS_MAP: Record<ModuleName, string[]> = {
   customer: ['add_customer', 'edit_customer', 'delete_customer'],
@@ -64,8 +60,6 @@ export const MODULE_RIGHTS_MAP: Record<ModuleName, string[]> = {
     'edit_sale_detail',
     'delete_sale_detail',
   ],
-  // Payments is tied to sales transactions; holding view_sale_details grants access to Payments ledger & receipts
-  payments: ['view_sale_details', 'add_sale', 'edit_sale'],
   reports: [
     'report_top_customers',
     'report_product_master',
@@ -119,7 +113,6 @@ export function getAccessibleModules(
   const allModules: ModuleName[] = [
     'sales',
     'customer',
-    'payments',
     'products',
     'human-resources',
     'reports',
@@ -150,13 +143,6 @@ export const MODULE_METADATA: Record<ModuleName, ModuleMeta> = {
     href: '/customers',
     section: 'TRANSACTIONS',
     shortDesc: 'Client roster & credit terms',
-  },
-  payments: {
-    id: 'payments',
-    label: 'Payments',
-    href: '/payments',
-    section: 'TRANSACTIONS',
-    shortDesc: 'Official receipts & balances',
   },
   products: {
     id: 'products',

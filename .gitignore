@@ -39,6 +39,8 @@ yarn-error.log*
 # isolated auth credentials
 auth.db
 auth.db*
+hope.work.db
+hope.work.db*
 
 # backups
 backups/
