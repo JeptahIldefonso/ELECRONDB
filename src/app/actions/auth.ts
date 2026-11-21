@@ -1,6 +1,6 @@
 'use server';
 
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { cache } from 'react';
@@ -28,57 +28,90 @@ import {
  * Retrieves the current session (from session cookie or Supabase Auth).
  */
 
-const SESSION_COOKIE_NAME = 'hope_session';
-const SESSION_MAX_AGE = 86400 * 7; // 7 days
-
-interface SessionPayload {
-  userId: string;
-  email: string;
-  sessionVersion?: number;
-  exp: number;
-}
-
-const FALLBACK_AUTH_SECRET = 'electrondb-hope-erd-production-session-fallback-secret-2026';
-
-function getSessionSecret(): string {
-  const secret = process.env.AUTH_SECRET || process.env.SESSION_SECRET;
-  if (secret && secret.trim().length > 0) {
-    return secret.trim();
-  }
-  return FALLBACK_AUTH_SECRET;
-}
-
-function signSession(payload: SessionPayload): string {
-  const secret = getSessionSecret();
-  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const signature = crypto.createHmac('sha256', secret).update(encodedPayload).digest('base64url');
-  return `${encodedPayload}.${signature}`;
-}
-
-function verifySession(token: string): SessionPayload | null {
-  try {
-    const secret = getSessionSecret();
-    const parts = token.split('.');
-    if (parts.length !== 2) return null;
-    const [encodedPayload, signature] = parts;
-    const expectedSig = crypto.createHmac('sha256', secret).update(encodedPayload).digest('base64url');
-    const sigBuf = Buffer.from(signature);
-    const expBuf = Buffer.from(expectedSig);
-    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-      return null;
-    }
-    const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8')) as SessionPayload;
-    if (!payload.userId || !payload.exp || typeof payload.exp !== 'number' || Date.now() > payload.exp) {
-      return null; // Expired or malformed
-    }
-    return payload;
-  } catch {
-    return null;
-  }
-}
+import {
+  SESSION_COOKIE_NAME,
+  SESSION_MAX_AGE,
+  signSession,
+  verifySession,
+  type SessionPayload,
+} from '@/lib/auth-session';
 
 export const getCurrentUser = cache(async function getCurrentUser(): Promise<UserSession | null> {
   try {
+    // 1. Supabase Auth Session (Primary, per SUPABASE-EMAIL-AUTH.md C2)
+    try {
+      const supabase = await createClient();
+      let authUserId: string | null = null;
+      let authEmail: string = '';
+
+      try {
+        const { data: claimsData } = await supabase.auth.getClaims();
+        if (claimsData?.claims?.sub) {
+          authUserId = String(claimsData.claims.sub);
+          authEmail = String(claimsData.claims.email ?? '');
+        }
+      } catch {
+        // Fallback to getUser()
+      }
+
+      if (!authUserId) {
+        const { data: userData } = await supabase.auth.getUser();
+        if (userData?.user) {
+          authUserId = userData.user.id;
+          authEmail = userData.user.email ?? '';
+        }
+      }
+
+      if (authUserId) {
+        let role: UserRole = 'User';
+        let fullName = authEmail.split('@')[0] || 'User';
+
+        // Read role and name from public.app_users (Part B)
+        try {
+          const { data: profile } = await supabase
+            .from('app_users')
+            .select('role, full_name, username')
+            .eq('id', authUserId)
+            .single();
+
+          if (profile) {
+            const r = String(profile.role).toLowerCase();
+            role = r === 'superadmin' ? 'Superadmin' : r === 'admin' ? 'Admin' : 'User';
+            fullName = profile.full_name || profile.username || fullName;
+          }
+        } catch {
+          // Default to user
+        }
+
+        // Check local permissions / rights if available
+        let rights: string[] = [];
+        try {
+          await ensureAuthDb();
+          const account = authEmail ? await findAccountByEmail(authEmail) : null;
+          if (account?.rights?.length) {
+            rights = account.rights;
+            if (account.role && role === 'User') {
+              role = account.role;
+            }
+          }
+        } catch {
+          // Non-blocking
+        }
+
+        return {
+          id: authUserId,
+          email: authEmail,
+          role,
+          fullName,
+          rights,
+        };
+      }
+    } catch (supErr: any) {
+      if (supErr?.digest === 'DYNAMIC_SERVER_USAGE') throw supErr;
+      console.warn('[getCurrentUser] Supabase check note:', supErr?.message);
+    }
+
+    // 2. Fallback to local session cookie (for legacy/demo credentials)
     const cookieStore = await cookies();
     const sessionToken = cookieStore.get(SESSION_COOKIE_NAME)?.value;
 
@@ -92,7 +125,7 @@ export const getCurrentUser = cache(async function getCurrentUser(): Promise<Use
             const sessionVer = typeof session.sessionVersion === 'number' ? session.sessionVersion : 0;
             const accountVer = typeof account.sessionVersion === 'number' ? account.sessionVersion : 1;
             if (sessionVer < accountVer) {
-              return null; // Token invalidated or missing sessionVersion
+              return null;
             }
             return {
               id: account.userId,
@@ -112,29 +145,7 @@ export const getCurrentUser = cache(async function getCurrentUser(): Promise<Use
       return null;
     }
 
-    // Fallback to Supabase Auth if session cookies are absent
-    try {
-      const supabase = await createClient();
-      const {
-        data: { user },
-        error,
-      } = await supabase.auth.getUser();
-
-      if (error || !user) return null;
-
-      const role = (user.app_metadata?.role as UserRole) || 'Admin';
-      const fullName = user.user_metadata?.full_name || user.email?.split('@')[0] || 'User';
-
-      return {
-        id: user.id,
-        email: user.email || '',
-        role,
-        fullName,
-        rights: [],
-      };
-    } catch {
-      return null;
-    }
+    return null;
   } catch (outerErr: any) {
     if (
       outerErr?.digest === 'DYNAMIC_SERVER_USAGE' ||
@@ -179,6 +190,11 @@ export async function loginAction(formData: FormData): Promise<{ error?: string 
       // Check if user is blocked (§3.8)
       if (account.isBlocked) {
         return { error: 'Your account has been blocked by an administrator.' };
+      }
+
+      // Check if user is inactive (unverified email)
+      if (account.status === 'Inactive') {
+        return { error: 'Please check your email and verify your account before signing in.' };
       }
 
       // 2. Verify password against bcrypt hash
@@ -226,7 +242,11 @@ export async function loginAction(formData: FormData): Promise<{ error?: string 
  * In the Student Guide (§1.2 & §3.1, Fig 3):
  * "New accounts are always created as User; Superadmin and Admin roles can only be assigned by existing administrators."
  */
-export async function registerAction(formData: FormData): Promise<{ error?: string }> {
+export async function registerAction(formData: FormData): Promise<{ 
+  error?: string; 
+  requiresVerification?: boolean; 
+  email?: string;
+}> {
   try {
     const firstName = (formData.get('firstName') as string)?.trim() || '';
     const lastName = (formData.get('lastName') as string)?.trim() || '';
@@ -249,7 +269,7 @@ export async function registerAction(formData: FormData): Promise<{ error?: stri
       console.warn('[registerAction] Database init note:', dbErr?.message);
     }
 
-    // 1. Prevent duplicate registrations
+    // 1. Prevent duplicate registrations in local DB
     try {
       if (await emailExists(email)) {
         return { error: 'An account with this email address already exists. Please sign in.' };
@@ -258,19 +278,91 @@ export async function registerAction(formData: FormData): Promise<{ error?: stri
       console.warn('[registerAction] Email check warning:', existsErr?.message);
     }
 
-    // 2. Hash password with bcrypt salt
-    const passwordHash = await hashPassword(password);
+    // 2. Call Supabase Auth signUp with emailRedirectTo
+    const headerList = await headers();
+    const origin = headerList.get('origin') || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+    
+    let authData: any = null;
+    let authError: any = null;
 
-    // 3. New registrations strictly get role 'User'
     try {
-      await insertAccount(email, passwordHash, fullName, 'User');
+      const supabase = await createClient();
+      const res = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: `${origin}/auth/callback`,
+          data: {
+            first_name: firstName,
+            last_name: lastName,
+            full_name: fullName,
+            role: 'User',
+          },
+        },
+      });
+      authData = res.data;
+      authError = res.error;
+    } catch (supErr: any) {
+      console.warn('[registerAction] Supabase signUp note:', supErr?.message);
+    }
+
+    if (authError) {
+      if (authError.message.toLowerCase().includes('already registered')) {
+        const localExists = await emailExists(email);
+        if (localExists) {
+          return { error: 'An account with this email address already exists. Please sign in.' };
+        }
+        // Account exists in Supabase from a previous attempt but not locally yet
+        authData = { user: { id: `usr-${Date.now()}` } };
+      } else {
+        return { error: authError.message };
+      }
+    }
+
+    // 3. Hash password with bcrypt salt for local USERS DB
+    const passwordHash = await hashPassword(password);
+    const requiresVerification = Boolean(authData?.user && !authData?.session);
+    const initialStatus: 'Active' | 'Inactive' = requiresVerification ? 'Inactive' : 'Active';
+
+    // 4. Save account to local USERS database
+    try {
+      const { getStampString } = await import('@/lib/auth-db');
+      const { getHopeDb } = await import('@/lib/hope-db');
+      const db = getHopeDb();
+      const userId = authData?.user?.id || `usr-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+      const stamp = getStampString(requiresVerification ? 'REGISTERED' : 'CREATED', 'system');
+      
+      const existing = await db.get<any>('SELECT userId FROM USERS WHERE LOWER(email) = ?', [email]);
+      if (existing) {
+        await db.run(`
+          UPDATE USERS 
+          SET firstName = ?, lastName = ?, passwordHash = ?, status = ?, stamp = ?
+          WHERE LOWER(email) = ?
+        `, [firstName || 'User', lastName || 'User', passwordHash, initialStatus, stamp, email]);
+      } else {
+        await db.run(`
+          INSERT INTO USERS (userId, firstName, lastName, email, passwordHash, role, isBlocked, status, stamp)
+          VALUES (?, ?, ?, ?, ?, 'User', 0, ?, ?)
+        `, [userId, firstName || 'User', lastName || 'User', email, passwordHash, initialStatus, stamp]);
+      }
     } catch (err: any) {
+      if (err?.message?.includes('UNIQUE')) {
+        return { error: 'An account with this email address already exists. Please sign in.' };
+      }
       return { error: err?.message || 'Failed to save account to database.' };
     }
 
-    // 4. Establish cryptographically signed session cookie
+    // 5. If verification is required, return success flag without setting session cookie
+    if (requiresVerification) {
+      return {
+        requiresVerification: true,
+        email,
+      };
+    }
+
+    // 6. Fallback: If confirm email is disabled, log in directly
     const sessionToken = signSession({
-      userId: `usr-${Date.now()}`,
+      userId: authData?.user?.id || `usr-${Date.now()}`,
       email: email.toLowerCase(),
       exp: Date.now() + SESSION_MAX_AGE * 1000,
     });

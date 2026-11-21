@@ -6,10 +6,13 @@ export async function updateSession(request: NextRequest) {
     request,
   });
 
+  const pathname = request.nextUrl.pathname;
+
   const isPublicStatic =
-    request.nextUrl.pathname.startsWith('/_next') ||
-    request.nextUrl.pathname.startsWith('/api') ||
-    request.nextUrl.pathname.includes('.');
+    pathname.startsWith('/_next') ||
+    pathname.startsWith('/api/health') ||
+    pathname.startsWith('/api/keepalive') ||
+    pathname.includes('.');
 
   if (isPublicStatic) {
     return supabaseResponse;
@@ -17,7 +20,9 @@ export async function updateSession(request: NextRequest) {
 
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    const supabaseKey =
+      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
     if (!supabaseUrl || !supabaseKey || supabaseUrl.includes('placeholder')) {
       return supabaseResponse;
@@ -40,18 +45,47 @@ export async function updateSession(request: NextRequest) {
       },
     });
 
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    // Refresh auth session
+    let hasValidSession = false;
+    try {
+      const { data } = await supabase.auth.getClaims();
+      if (data?.claims) {
+        hasValidSession = true;
+      } else {
+        const { data: userData } = await supabase.auth.getUser();
+        if (userData?.user) {
+          hasValidSession = true;
+        }
+      }
+    } catch {
+      // Ignore
+    }
 
-    const isLoginPage = request.nextUrl.pathname === '/login';
-    if (user && isLoginPage) {
+    // Also check legacy hope_session cookie for backward compatibility
+    if (!hasValidSession && request.cookies.has('hope_session')) {
+      hasValidSession = true;
+    }
+
+    const isPublicRoute =
+      pathname === '/login' ||
+      pathname === '/landing' ||
+      pathname === '/forgot-password' ||
+      pathname.startsWith('/auth/') ||
+      pathname.startsWith('/api/auth/');
+
+    if (hasValidSession && pathname === '/login') {
       const url = request.nextUrl.clone();
       url.pathname = '/';
       return NextResponse.redirect(url);
     }
+
+    if (!hasValidSession && !isPublicRoute) {
+      const url = request.nextUrl.clone();
+      url.pathname = '/login';
+      return NextResponse.redirect(url);
+    }
   } catch (err: any) {
-    console.warn('[middleware] Supabase session check error:', err?.message);
+    console.warn('[middleware] Session check note:', err?.message);
   }
 
   return supabaseResponse;
