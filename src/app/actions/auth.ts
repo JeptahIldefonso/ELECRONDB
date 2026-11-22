@@ -476,7 +476,7 @@ export async function updateUserRightsAction(targetUserId: string, rightCodes: s
       return { success: false, error: 'Access denied: Only administrators can update user rights.' };
     }
 
-    const res = await updateUserRights(targetUserId, rightCodes, currentUser.fullName || 'Admin');
+    const res = await updateUserRights(targetUserId, rightCodes, currentUser.fullName || currentUser.email || 'Admin');
     revalidatePath('/users');
     revalidatePath('/', 'layout');
     return res;

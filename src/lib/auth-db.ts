@@ -40,6 +40,7 @@ import bcrypt from 'bcryptjs';
 import type { UserRole, UserAccount } from '@/lib/types';
 import { CANONICAL_RIGHTS } from '@/lib/types';
 import { getHopeDb, type HopeDatabase } from '@/lib/hope-db';
+import { calculateRightsDiff, insertAuditLog } from '@/lib/audit';
 
 let tablesInitialized = false;
 
@@ -568,9 +569,23 @@ export async function updateUserRights(userId: string, rightCodes: string[], upd
   const db = getHopeDb();
 
   let role = 'User';
-  const appUser = await db.get<any>('SELECT role FROM app_users WHERE id::text = ?', [userId]);
+  const appUser = await db.get<any>('SELECT role, email, full_name, username FROM app_users WHERE id::text = ?', [userId]);
   if (appUser) {
     role = String(appUser.role).toLowerCase() === 'superadmin' ? 'Superadmin' : 'User';
+    // Ensure USERS record exists to satisfy foreign key constraint on USERRIGHTS in Postgres
+    try {
+      const fullName = appUser.full_name || appUser.username || appUser.email?.split('@')[0] || 'User';
+      const parts = fullName.trim().split(' ');
+      const firstName = parts[0] || 'User';
+      const lastName = parts.slice(1).join(' ') || 'User';
+      const userRole = role === 'Superadmin' ? 'Superadmin' : 'User';
+      await db.run(
+        `INSERT INTO USERS (userId, firstName, lastName, email, passwordHash, role, stamp)
+         VALUES (?, ?, ?, ?, 'AUTH_SYNCED', ?, 'SYNCED')
+         ON CONFLICT (userId) DO NOTHING`,
+        [userId, firstName, lastName, appUser.email || `${userId}@hope.local`, userRole]
+      );
+    } catch {}
   } else {
     const user = await db.get<any>('SELECT role FROM USERS WHERE userId = ?', [userId]);
     if (user) role = user.role;
@@ -578,13 +593,32 @@ export async function updateUserRights(userId: string, rightCodes: string[], upd
 
   if (role === 'Superadmin') return { success: false, error: 'Superadmin rights cannot be modified.' };
 
+  // Fetch current rights to calculate diff
+  const oldRights = await getUserRights(userId);
+  const diff = calculateRightsDiff(oldRights, rightCodes);
+
+  // If no change occurred, do not rewrite or insert audit row (Stage 2 Verification 2)
+  if (!diff.hasChanged) {
+    return { success: true };
+  }
+
   // Clear existing rights
   await db.run('DELETE FROM USERRIGHTS WHERE userId = ?', [userId]);
 
   // Insert updated rights
-  for (const code of rightCodes) {
+  for (const code of diff.newSorted) {
     await db.run('INSERT INTO USERRIGHTS (userId, rightCode) VALUES (?, ?)', [userId, code]);
   }
+
+  // Record audit row (Stage 2 Verification 1)
+  await insertAuditLog({
+    tableName: 'app_users',
+    action: 'EDIT',
+    recordKey: userId,
+    oldValues: { rights: diff.oldSorted },
+    newValues: { rights: diff.newSorted },
+    actionBy: updatedBy,
+  });
 
   return { success: true };
 }
@@ -674,6 +708,11 @@ export async function updateUserProfile(
 
   try {
     if (appUser) {
+      if (db.isPostgres) {
+        try {
+          await db.run("SELECT set_config('app.username', ?, true)", [updatedBy]);
+        } catch {}
+      }
       if (appRole) {
         await db.run(
           `UPDATE app_users SET full_name = ?, role = ? WHERE id::text = ? OR LOWER(email) = ?`,
