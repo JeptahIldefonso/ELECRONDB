@@ -1481,51 +1481,8 @@ FOR EACH ROW BEGIN
     SELECT RAISE(ABORT, 'Hard delete/truncate not allowed on PRICEHIST. Use UPDATE ... SET is_deleted = 1.');
 END;
 
--- Children check before soft-delete
-CREATE TRIGGER employee_bu_check BEFORE UPDATE OF is_deleted ON EMPLOYEE
-FOR EACH ROW WHEN NEW.is_deleted = 1 AND OLD.is_deleted = 0
-BEGIN
-    SELECT RAISE(ABORT, 'Cannot delete EMPLOYEE: active related record(s) still exist in JOBHISTORY or SALES.')
-    WHERE EXISTS (SELECT 1 FROM JOBHISTORY WHERE empNo = OLD.empNo AND is_deleted = 0)
-       OR EXISTS (SELECT 1 FROM SALES WHERE empNo = OLD.empNo AND is_deleted = 0);
-END;
-
-CREATE TRIGGER department_bu_check BEFORE UPDATE OF is_deleted ON DEPARTMENT
-FOR EACH ROW WHEN NEW.is_deleted = 1 AND OLD.is_deleted = 0
-BEGIN
-    SELECT RAISE(ABORT, 'Cannot delete DEPARTMENT: active related record(s) still exist in JOBHISTORY.')
-    WHERE EXISTS (SELECT 1 FROM JOBHISTORY WHERE deptCode = OLD.deptCode AND is_deleted = 0);
-END;
-
-CREATE TRIGGER job_bu_check BEFORE UPDATE OF is_deleted ON JOB
-FOR EACH ROW WHEN NEW.is_deleted = 1 AND OLD.is_deleted = 0
-BEGIN
-    SELECT RAISE(ABORT, 'Cannot delete JOB: active related record(s) still exist in JOBHISTORY.')
-    WHERE EXISTS (SELECT 1 FROM JOBHISTORY WHERE jobCode = OLD.jobCode AND is_deleted = 0);
-END;
-
-CREATE TRIGGER customer_bu_check BEFORE UPDATE OF is_deleted ON CUSTOMER
-FOR EACH ROW WHEN NEW.is_deleted = 1 AND OLD.is_deleted = 0
-BEGIN
-    SELECT RAISE(ABORT, 'Cannot delete CUSTOMER: active related record(s) still exist in SALES.')
-    WHERE EXISTS (SELECT 1 FROM SALES WHERE custNo = OLD.custNo AND is_deleted = 0);
-END;
-
-CREATE TRIGGER product_bu_check BEFORE UPDATE OF is_deleted ON PRODUCT
-FOR EACH ROW WHEN NEW.is_deleted = 1 AND OLD.is_deleted = 0
-BEGIN
-    SELECT RAISE(ABORT, 'Cannot delete PRODUCT: active related record(s) still exist in SALESDETAIL or PRICEHIST.')
-    WHERE EXISTS (SELECT 1 FROM SALESDETAIL WHERE prodCode = OLD.prodCode AND is_deleted = 0)
-       OR EXISTS (SELECT 1 FROM PRICEHIST WHERE prodCode = OLD.prodCode AND is_deleted = 0);
-END;
-
-CREATE TRIGGER sales_bu_check BEFORE UPDATE OF is_deleted ON SALES
-FOR EACH ROW WHEN NEW.is_deleted = 1 AND OLD.is_deleted = 0
-BEGIN
-    SELECT RAISE(ABORT, 'Cannot delete SALES: active related record(s) still exist in SALESDETAIL or PAYMENT.')
-    WHERE EXISTS (SELECT 1 FROM SALESDETAIL WHERE transNo = OLD.transNo AND is_deleted = 0)
-       OR EXISTS (SELECT 1 FROM PAYMENT WHERE transNo = OLD.transNo AND is_deleted = 0);
-END;
+-- Soft-delete architecture preserves child records for historical integrity.
+-- Hard delete is blocked by _bd_block triggers above.
 
 -- Protect audit_log (append-only)
 CREATE TRIGGER audit_log_protect_update BEFORE UPDATE ON audit_log

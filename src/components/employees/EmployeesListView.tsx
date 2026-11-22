@@ -1219,7 +1219,11 @@ export function EmployeesListView({
             </div>
 
             <div className="space-y-1.5 text-xs">
-              {initialDepartments.slice(0, 5).map((d) => (
+              {initialDepartments
+                .filter((d) => !d.isDeleted)
+                .sort((a, b) => (b.activeStaffCount ?? 0) - (a.activeStaffCount ?? 0))
+                .slice(0, 5)
+                .map((d) => (
                 <div
                   key={d.deptCode}
                   className="flex items-center justify-between py-1 px-1.5 rounded hover:bg-slate-50 dark:hover:bg-slate-800/50"
@@ -1280,10 +1284,20 @@ export function EmployeesListView({
               )}
             </div>
 
+            {actionError && (
+              <div className="mt-3 p-2.5 rounded bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-1.5">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{actionError}</span>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-2 mt-5">
               <button
                 type="button"
-                onClick={() => setDeletingTarget(null)}
+                onClick={() => {
+                  setDeletingTarget(null);
+                  setActionError(null);
+                }}
                 disabled={isSubmitting}
                 className="px-3 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 hover:bg-slate-100"
               >

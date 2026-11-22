@@ -64,8 +64,9 @@ export function EditEmployeeModal({
       setIsSubmitting(false);
       onClose();
       router.refresh();
-    } catch {
-      setError('An unexpected error occurred while updating employee.');
+    } catch (err: any) {
+      console.error('[EditEmployeeModal error]:', err);
+      setError(err?.message || 'An unexpected error occurred while updating employee.');
       setIsSubmitting(false);
     }
   };

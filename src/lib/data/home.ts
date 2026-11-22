@@ -123,12 +123,14 @@ export async function getHomeSummary(forceFailure = false): Promise<HomeSummaryR
   };
 
   try {
-    if (
+    const db = getHopeDb();
+    const isPg = db.engine === 'postgres';
+    if (!isPg && (
       process.env.NEXT_PUBLIC_SUPABASE_URL &&
       !process.env.NEXT_PUBLIC_SUPABASE_URL.includes('your-project') &&
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY &&
       !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY.includes('your-anon')
-    ) {
+    )) {
       try {
         const supabase = await createClient();
 
@@ -209,22 +211,38 @@ export async function getHomeSummary(forceFailure = false): Promise<HomeSummaryR
     let counts = { ...FALLBACK_COUNTS };
     try {
       const db = getHopeDb();
-      for (const table of Object.keys(FALLBACK_COUNTS)) {
+      if (db.engine === 'postgres') {
         try {
-          const row = db.prepare(`SELECT count(*) as cnt FROM "${table}"`).get() as { cnt: number };
-          if (row && typeof row.cnt === 'number') {
-            counts[table] = row.cnt;
+          const unionSql = Object.keys(FALLBACK_COUNTS).map(
+            (t) => `SELECT '${t}' as tbl, count(*)::int as cnt FROM "${t.toLowerCase()}"`
+          ).join(' UNION ALL ');
+          const unionRows = await db.query<{ tbl: string; cnt: number }>(unionSql);
+          for (const r of unionRows) {
+            counts[String(r.tbl).toUpperCase()] = Number(r.cnt ?? 0);
           }
         } catch {
-          // ignore individual missing table
+          // fallback
         }
+      } else {
+        await Promise.all(
+          Object.keys(FALLBACK_COUNTS).map(async (table) => {
+            try {
+              const row = await db.get<{ cnt: number }>(`SELECT count(*) as cnt FROM "${table}"`);
+              if (row && typeof row.cnt === 'number') {
+                counts[table] = row.cnt;
+              }
+            } catch {}
+          })
+        );
       }
 
       // Dynamic KPIs directly from canonical tables & views
       try {
-        const revRow = db.prepare('SELECT SUM(totalAmount) as totalRev, count(*) as totalTrans FROM v_sales_summary').get() as any;
-        const payRow = db.prepare('SELECT SUM(amount) as totalPaid FROM PAYMENT').get() as any;
-        const empRow = db.prepare('SELECT count(*) as totalEmp FROM EMPLOYEE WHERE sepDate IS NULL').get() as any;
+        const [revRow, payRow, empRow] = await Promise.all([
+          db.get<any>('SELECT SUM(totalAmount) as totalRev, count(*) as totalTrans FROM v_sales_summary'),
+          db.get<any>('SELECT SUM(amount) as totalPaid FROM PAYMENT'),
+          db.get<any>('SELECT count(*) as totalEmp FROM EMPLOYEE WHERE sepDate IS NULL'),
+        ]);
 
         const totalSales = Number(revRow?.totalRev || 0);
         const totalTransactions = Number(revRow?.totalTrans || 0);
@@ -246,20 +264,46 @@ export async function getHomeSummary(forceFailure = false): Promise<HomeSummaryR
 
         // Detailed Audit Calculations for interactive modals
         try {
-          const allSalesRows = db.prepare(`
-            SELECT 
-              s.transNo,
-              s.salesDate,
-              c.custName,
-              COALESCE(COUNT(sd.prodCode), 0) as itemCount,
-              COALESCE(SUM(l.lineAmount), 0.0) as totalAmount
-            FROM SALES s
-            JOIN CUSTOMER c ON c.custNo = s.custNo
-            LEFT JOIN SALESDETAIL sd ON sd.transNo = s.transNo
-            LEFT JOIN v_sale_lines l ON l.transNo = sd.transNo AND l.prodCode = sd.prodCode
-            GROUP BY s.transNo, s.salesDate, c.custName
-            ORDER BY s.salesDate ASC, s.transNo ASC
-          `).all() as any[];
+          const [allSalesRows, custDistRows, allPayRows, allEmpRows] = await Promise.all([
+            db.query(`
+              SELECT 
+                s.transNo,
+                s.salesDate,
+                c.custName,
+                COALESCE(COUNT(sd.prodCode), 0) as itemCount,
+                COALESCE(SUM(l.lineAmount), 0.0) as totalAmount
+              FROM SALES s
+              JOIN CUSTOMER c ON c.custNo = s.custNo
+              LEFT JOIN SALESDETAIL sd ON sd.transNo = s.transNo
+              LEFT JOIN v_sale_lines l ON l.transNo = sd.transNo AND l.prodCode = sd.prodCode
+              GROUP BY s.transNo, s.salesDate, c.custName
+              ORDER BY s.salesDate ASC, s.transNo ASC
+            `),
+            db.query(`
+              SELECT c.custName, count(s.transNo) as transCount, SUM(v.totalAmount) as custTotal
+              FROM CUSTOMER c
+              JOIN SALES s ON s.custNo = c.custNo
+              JOIN v_sales_summary v ON v.transNo = s.transNo
+              GROUP BY c.custName
+              ORDER BY transCount DESC, custTotal DESC
+            `),
+            db.query(`
+              SELECT ORNo, payDate, amount, transNo
+              FROM PAYMENT
+              ORDER BY payDate ASC, ORNo ASC
+            `),
+            db.query(`
+              SELECT 
+                e.empNo,
+                e.firstName || ' ' || e.lastName as fullName,
+                e.hireDate,
+                e.sepDate,
+                COALESCE((SELECT d.deptName FROM JOBHISTORY jh JOIN DEPARTMENT d ON d.deptCode = jh.deptCode WHERE jh.empNo = e.empNo ORDER BY jh.effDate DESC LIMIT 1), 'Staff') as deptName,
+                COALESCE((SELECT j.jobDesc FROM JOBHISTORY jh JOIN JOB j ON j.jobCode = jh.jobCode WHERE jh.empNo = e.empNo ORDER BY jh.effDate DESC LIMIT 1), 'Employee') as jobDesc
+              FROM EMPLOYEE e
+              ORDER BY e.empNo ASC
+            `)
+          ]);
 
           let runSales = 0;
           kpis.salesAudit = allSalesRows.map((r) => {
@@ -276,28 +320,11 @@ export async function getHomeSummary(forceFailure = false): Promise<HomeSummaryR
             };
           });
 
-          // Customer transaction distribution
-          const custDistRows = db.prepare(`
-            SELECT c.custName, count(s.transNo) as transCount, SUM(v.totalAmount) as custTotal
-            FROM CUSTOMER c
-            JOIN SALES s ON s.custNo = c.custNo
-            JOIN v_sales_summary v ON v.transNo = s.transNo
-            GROUP BY c.custName
-            ORDER BY transCount DESC, custTotal DESC
-          `).all() as any[];
-
           kpis.customerDistribution = custDistRows.map((r) => ({
             custName: String(r.custName),
             count: Number(r.transCount || 0),
             totalAmountFormatted: new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(Number(r.custTotal || 0)),
           }));
-
-          // Payments calculation audit
-          const allPayRows = db.prepare(`
-            SELECT ORNo, payDate, amount, transNo
-            FROM PAYMENT
-            ORDER BY payDate ASC, ORNo ASC
-          `).all() as any[];
 
           let runPay = 0;
           kpis.paymentsAudit = allPayRows.map((r) => {
@@ -312,19 +339,6 @@ export async function getHomeSummary(forceFailure = false): Promise<HomeSummaryR
               runningTotalFormatted: new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(runPay),
             };
           });
-
-          // Employees calculation audit
-          const allEmpRows = db.prepare(`
-            SELECT 
-              e.empNo,
-              e.firstName || ' ' || e.lastName as fullName,
-              e.hireDate,
-              e.sepDate,
-              COALESCE((SELECT d.deptName FROM JOBHISTORY jh JOIN DEPARTMENT d ON d.deptCode = jh.deptCode WHERE jh.empNo = e.empNo ORDER BY jh.effDate DESC LIMIT 1), 'Staff') as deptName,
-              COALESCE((SELECT j.jobDesc FROM JOBHISTORY jh JOIN JOB j ON j.jobCode = jh.jobCode WHERE jh.empNo = e.empNo ORDER BY jh.effDate DESC LIMIT 1), 'Employee') as jobDesc
-            FROM EMPLOYEE e
-            ORDER BY e.empNo ASC
-          `).all() as any[];
 
           kpis.employeesAudit = allEmpRows.map((r) => ({
             empNo: Number(r.empNo),
@@ -350,7 +364,7 @@ export async function getHomeSummary(forceFailure = false): Promise<HomeSummaryR
 
     return {
       success: true,
-      isSupabaseConnected: false,
+      isSupabaseConnected: db.engine === 'postgres',
       durationMs,
       data: {
         checkedAt: getPhtFormattedTime(),

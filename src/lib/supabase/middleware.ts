@@ -6,10 +6,29 @@ export async function updateSession(request: NextRequest) {
     request,
   });
 
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://demo.supabase.co',
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'demo-anon-key',
-    {
+  const pathname = request.nextUrl.pathname;
+
+  const isPublicStatic =
+    pathname.startsWith('/_next') ||
+    pathname.startsWith('/api/health') ||
+    pathname.startsWith('/api/keepalive') ||
+    pathname.includes('.');
+
+  if (isPublicStatic) {
+    return supabaseResponse;
+  }
+
+  try {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseKey =
+      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !supabaseKey || supabaseUrl.includes('placeholder')) {
+      return supabaseResponse;
+    }
+
+    const supabase = createServerClient(supabaseUrl, supabaseKey, {
       cookies: {
         getAll() {
           return request.cookies.getAll();
@@ -24,33 +43,50 @@ export async function updateSession(request: NextRequest) {
           );
         },
       },
+    });
+
+    // Refresh auth session
+    let hasValidSession = false;
+    try {
+      const { data } = await supabase.auth.getClaims();
+      if (data?.claims) {
+        hasValidSession = true;
+      } else {
+        const { data: userData } = await supabase.auth.getUser();
+        if (userData?.user) {
+          hasValidSession = true;
+        }
+      }
+    } catch {
+      // Ignore
     }
-  );
 
-  // IMPORTANT: Avoid using getSession() on server/middleware; use getUser()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+    // Also check legacy hope_session cookie for backward compatibility
+    if (!hasValidSession && request.cookies.has('hope_session')) {
+      hasValidSession = true;
+    }
 
-  // Route protection
-  const isLoginPage = request.nextUrl.pathname === '/login';
-  const isPublicStatic = 
-    request.nextUrl.pathname.startsWith('/_next') ||
-    request.nextUrl.pathname.startsWith('/api') ||
-    request.nextUrl.pathname.includes('.');
+    const isPublicRoute =
+      pathname === '/login' ||
+      pathname === '/landing' ||
+      pathname === '/forgot-password' ||
+      pathname.startsWith('/auth/') ||
+      pathname.startsWith('/api/auth/');
 
-  // Allow static assets freely
-  if (isPublicStatic) {
-    return supabaseResponse;
+    if (hasValidSession && pathname === '/login') {
+      const url = request.nextUrl.clone();
+      url.pathname = '/';
+      return NextResponse.redirect(url);
+    }
+
+    if (!hasValidSession && !isPublicRoute) {
+      const url = request.nextUrl.clone();
+      url.pathname = '/login';
+      return NextResponse.redirect(url);
+    }
+  } catch (err: any) {
+    console.warn('[middleware] Session check note:', err?.message);
   }
 
-  // Redirect to home if logged in and visiting login page
-  if (user && isLoginPage) {
-    const url = request.nextUrl.clone();
-    url.pathname = '/';
-    return NextResponse.redirect(url);
-  }
-
-  // Note: For demo accounts, demo mode is enabled in Task 3 actions
   return supabaseResponse;
 }

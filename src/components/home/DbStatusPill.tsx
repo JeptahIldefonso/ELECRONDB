@@ -11,7 +11,6 @@ import {
   RefreshCw,
   Database,
   Info,
-  ArrowRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -366,20 +365,12 @@ export function DbStatusPill({ onStatusChange }: DbStatusPillProps) {
             </div>
           </div>
 
-          {/* Explanatory Footer Note & Data Model Link */}
+          {/* Explanatory Footer Note */}
           <div className="mt-3 pt-2.5 border-t border-border flex items-center justify-between gap-2 text-[10.5px]">
             <div className="flex items-center gap-1.5 text-text-muted min-w-0">
               <Info className="w-3.5 h-3.5 text-text-faint shrink-0" />
-              <span className="truncate">Live tables</span>
+              <span className="truncate">Live verified database tables</span>
             </div>
-            <Link
-              href="/data-model"
-              onClick={() => setIsOpen(false)}
-              className="font-mono text-[10.5px] font-semibold text-accent hover:underline flex items-center gap-1 shrink-0 cursor-pointer"
-            >
-              <span>View data model</span>
-              <ArrowRight className="w-3 h-3" />
-            </Link>
           </div>
         </div>
       )}

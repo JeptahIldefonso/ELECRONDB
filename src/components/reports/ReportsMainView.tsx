@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useTransition, useMemo, useEffect } from 'react';
+import React, { useState, useTransition, useMemo, useEffect, useRef } from 'react';
 import {
   Printer,
   Download,
@@ -115,6 +115,7 @@ export function ReportsMainView({
 
   const [isPending, startTransition] = useTransition();
   const [reportError, setReportError] = useState<string | null>(null);
+  const isFirstMount = useRef(true);
 
   const hasAccessToActiveTab = isAdmin || allowedTabs.includes(activeTab);
 
@@ -129,6 +130,10 @@ export function ReportsMainView({
   // REACTIVE RE-FETCHING WHEN FILTERS CHANGE
   // ------------------------------------------------------------------------
   useEffect(() => {
+    if (isFirstMount.current) {
+      isFirstMount.current = false;
+      return;
+    }
     if (!hasAccessToActiveTab) return;
 
     if (activeTab === 'top-customers') {

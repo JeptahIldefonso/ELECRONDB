@@ -10,7 +10,6 @@ import {
 import {
   ShoppingCart,
   Users,
-  CreditCard,
   Package,
   Briefcase,
   FileText,
@@ -27,7 +26,6 @@ interface QuickActionsProps {
 const MODULE_ICONS: Record<ModuleName, React.ComponentType<{ className?: string }>> = {
   sales: ShoppingCart,
   customer: Users,
-  payments: CreditCard,
   products: Package,
   'human-resources': Briefcase,
   reports: FileText,
@@ -37,7 +35,6 @@ const MODULE_ICONS: Record<ModuleName, React.ComponentType<{ className?: string 
 const ACTION_MODULES: ModuleName[] = [
   'sales',
   'customer',
-  'payments',
   'products',
   'human-resources',
   'reports',

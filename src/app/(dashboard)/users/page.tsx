@@ -19,13 +19,14 @@ export default async function UsersPage() {
     redirect('/?denied=1');
   }
 
-  const users = getAllUsers(user.role);
+  const users = await getAllUsers(user.role);
 
   return (
     <div className="space-y-6">
       <UserManagementView
         initialUsers={users}
         currentUserRole={user.role}
+        currentUserId={user.id}
       />
     </div>
   );

@@ -108,7 +108,7 @@ export function CustomersMainView({
     }
 
     return result;
-  }, [initialCustomers, statusFilter, searchQuery]);
+  }, [initialCustomers, statusFilter, searchQuery, isAdmin]);
 
   // Pagination calculation
   const totalItems = filteredCustomers.length;
@@ -553,12 +553,22 @@ export function CustomersMainView({
               <p><span className="text-slate-500">Terms:</span> <span>{formatPayTermDisplay(deletingCustomer.payterm)}</span></p>
             </div>
 
+            {actionError && (
+              <div className="rounded-md bg-rose-50 dark:bg-rose-950/40 p-3 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-800 dark:text-rose-300 flex items-start gap-1.5">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{actionError}</span>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-700">
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setDeletingCustomer(null)}
+                onClick={() => {
+                  setDeletingCustomer(null);
+                  setActionError(null);
+                }}
                 disabled={isSubmitting}
               >
                 Cancel

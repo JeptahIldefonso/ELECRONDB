@@ -1,14 +1,18 @@
 'use server';
 
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { cache } from 'react';
+import crypto from 'node:crypto';
 import { createClient } from '@/lib/supabase/server';
 import type { UserRole, UserSession, UserAccount } from '@/lib/types';
 import {
   ensureAuthDb,
   findAccountByEmail,
+  findAccountById,
+  adminResetUserPassword,
+  updateUserPassword,
   emailExists,
   insertAccount,
   hashPassword,
@@ -23,48 +27,134 @@ import {
 /**
  * Retrieves the current session (from session cookie or Supabase Auth).
  */
-export const getCurrentUser = cache(async function getCurrentUser(): Promise<UserSession | null> {
-  const cookieStore = await cookies();
-  const demoRole = cookieStore.get('hope_demo_role')?.value as UserRole | undefined;
-  const demoEmail = cookieStore.get('hope_demo_email')?.value;
-  const demoName = cookieStore.get('hope_demo_name')?.value;
 
-  if (demoRole && demoEmail) {
-    const account = findAccountByEmail(demoEmail);
-    if (account?.isBlocked) {
+import {
+  SESSION_COOKIE_NAME,
+  SESSION_MAX_AGE,
+  signSession,
+  verifySession,
+  type SessionPayload,
+} from '@/lib/auth-session';
+
+export const getCurrentUser = cache(async function getCurrentUser(): Promise<UserSession | null> {
+  try {
+    // 1. Supabase Auth Session (Primary, per SUPABASE-EMAIL-AUTH.md C2)
+    try {
+      const supabase = await createClient();
+      let authUserId: string | null = null;
+      let authEmail: string = '';
+
+      try {
+        const { data: claimsData } = await supabase.auth.getClaims();
+        if (claimsData?.claims?.sub) {
+          authUserId = String(claimsData.claims.sub);
+          authEmail = String(claimsData.claims.email ?? '');
+        }
+      } catch {
+        // Fallback to getUser()
+      }
+
+      if (!authUserId) {
+        const { data: userData } = await supabase.auth.getUser();
+        if (userData?.user) {
+          authUserId = userData.user.id;
+          authEmail = userData.user.email ?? '';
+        }
+      }
+
+      if (authUserId) {
+        let role: UserRole = 'User';
+        let fullName = authEmail.split('@')[0] || 'User';
+
+        // Read role and name from public.app_users (Part B)
+        try {
+          const { data: profile } = await supabase
+            .from('app_users')
+            .select('role, full_name, username')
+            .eq('id', authUserId)
+            .single();
+
+          if (profile) {
+            const r = String(profile.role).toLowerCase();
+            role = r === 'superadmin' ? 'Superadmin' : r === 'admin' ? 'Admin' : 'User';
+            fullName = profile.full_name || profile.username || fullName;
+          }
+        } catch {
+          // Default to user
+        }
+
+        // Check local permissions / rights if available
+        let rights: string[] = [];
+        try {
+          await ensureAuthDb();
+          const account = authEmail ? await findAccountByEmail(authEmail) : null;
+          if (account?.rights?.length) {
+            rights = account.rights;
+            if (account.role && role === 'User') {
+              role = account.role;
+            }
+          }
+        } catch {
+          // Non-blocking
+        }
+
+        return {
+          id: authUserId,
+          email: authEmail,
+          role,
+          fullName,
+          rights,
+        };
+      }
+    } catch (supErr: any) {
+      if (supErr?.digest === 'DYNAMIC_SERVER_USAGE') throw supErr;
+      console.warn('[getCurrentUser] Supabase check note:', supErr?.message);
+    }
+
+    // 2. Fallback to local session cookie (for legacy/demo credentials)
+    const cookieStore = await cookies();
+    const sessionToken = cookieStore.get(SESSION_COOKIE_NAME)?.value;
+
+    if (sessionToken) {
+      const session = verifySession(sessionToken);
+      if (session) {
+        try {
+          await ensureAuthDb();
+          const account = await findAccountByEmail(session.email);
+          if (account && !account.isBlocked && account.status === 'Active') {
+            const sessionVer = typeof session.sessionVersion === 'number' ? session.sessionVersion : 0;
+            const accountVer = typeof account.sessionVersion === 'number' ? account.sessionVersion : 1;
+            if (sessionVer < accountVer) {
+              return null;
+            }
+            return {
+              id: account.userId,
+              email: account.email,
+              role: account.role,
+              fullName: account.fullName,
+              isBlocked: account.isBlocked,
+              rights: account.rights || [],
+              mustChangePassword: Boolean(account.mustChangePassword),
+              sessionVersion: account.sessionVersion ?? 1,
+            };
+          }
+        } catch (dbErr: any) {
+          console.warn('[getCurrentUser] Database lookup warning:', dbErr?.message);
+        }
+      }
       return null;
     }
-    return {
-      id: account?.userId || (account ? `staff-${account.id}` : 'demo-user-id'),
-      email: demoEmail,
-      role: account ? account.role : demoRole,
-      fullName: account ? account.fullName : demoName || 'Staff Member',
-      isBlocked: account?.isBlocked,
-      rights: account?.rights || [],
-    };
-  }
 
-  // Fallback to Supabase Auth if session cookies are absent
-  try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-      error,
-    } = await supabase.auth.getUser();
-
-    if (error || !user) return null;
-
-    const role = (user.app_metadata?.role as UserRole) || 'Admin';
-    const fullName = user.user_metadata?.full_name || user.email?.split('@')[0] || 'User';
-
-    return {
-      id: user.id,
-      email: user.email || '',
-      role,
-      fullName,
-      rights: [],
-    };
-  } catch {
+    return null;
+  } catch (outerErr: any) {
+    if (
+      outerErr?.digest === 'DYNAMIC_SERVER_USAGE' ||
+      outerErr?.message === 'NEXT_REDIRECT' ||
+      outerErr?.digest?.startsWith('NEXT_REDIRECT')
+    ) {
+      throw outerErr;
+    }
+    console.error('[getCurrentUser] Unexpected error:', outerErr);
     return null;
   }
 });
@@ -72,72 +162,79 @@ export const getCurrentUser = cache(async function getCurrentUser(): Promise<Use
 /**
  * Handles regular email/password login with secure bcrypt hash verification.
  */
-export async function loginAction(formData: FormData) {
-  const email = (formData.get('email') as string)?.trim().toLowerCase();
-  const password = formData.get('password') as string;
+export async function loginAction(formData: FormData): Promise<{ error?: string }> {
+  try {
+    const email = (formData.get('email') as string)?.trim().toLowerCase();
+    const password = formData.get('password') as string;
 
-  if (!email || !password) {
-    return { error: 'Please enter both email and password.' };
-  }
-
-  ensureAuthDb();
-
-  // 1. Look up account in local secure auth.db
-  const account = findAccountByEmail(email);
-
-  if (account) {
-    // Check if user is blocked (§3.8)
-    if (account.isBlocked) {
-      return { error: 'Your account has been blocked by an administrator.' };
+    if (!email || !password) {
+      return { error: 'Please enter both email and password.' };
     }
 
-    // 2. Verify password against bcrypt hash
-    const isValid = await verifyPassword(password, account.passwordHash);
-    if (!isValid) {
-      return { error: 'Invalid email or password.' };
+    try {
+      await ensureAuthDb();
+    } catch (dbErr: any) {
+      console.warn('[loginAction] Database init note:', dbErr?.message);
     }
 
-    // 3. Establish authenticated session cookie
-    const cookieStore = await cookies();
-    cookieStore.set('hope_demo_role', account.role, {
-      path: '/',
-      httpOnly: true,
-      maxAge: 86400 * 7,
-      sameSite: 'lax',
-    });
-    cookieStore.set('hope_demo_email', account.email, {
-      path: '/',
-      httpOnly: true,
-      maxAge: 86400 * 7,
-      sameSite: 'lax',
-    });
-    cookieStore.set('hope_demo_name', account.fullName, {
-      path: '/',
-      httpOnly: true,
-      maxAge: 86400 * 7,
-      sameSite: 'lax',
-    });
+    // 1. Look up account in unified DB
+    let account;
+    try {
+      account = await findAccountByEmail(email);
+    } catch (accErr: any) {
+      console.error('[loginAction] Account lookup error:', accErr);
+      return { error: 'Unable to query user account at this time. Please try again.' };
+    }
 
-    redirect('/');
+    if (account) {
+      // Check if user is blocked (§3.8)
+      if (account.isBlocked) {
+        return { error: 'Your account has been blocked by an administrator.' };
+      }
+
+      // Check if user is inactive (unverified email)
+      if (account.status === 'Inactive') {
+        return { error: 'Please check your email and verify your account before signing in.' };
+      }
+
+      // 2. Verify password against bcrypt hash
+      const isValid = await verifyPassword(password, account.passwordHash);
+      if (!isValid) {
+        return { error: 'Invalid email or password.' };
+      }
+
+      // 3. Establish cryptographically signed session cookie
+      const sessionToken = signSession({
+        userId: account.userId,
+        email: account.email,
+        sessionVersion: account.sessionVersion ?? 1,
+        exp: Date.now() + SESSION_MAX_AGE * 1000,
+      });
+
+      const cookieStore = await cookies();
+      cookieStore.set(SESSION_COOKIE_NAME, sessionToken, {
+        path: '/',
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        maxAge: SESSION_MAX_AGE,
+        sameSite: 'lax',
+      });
+
+      if (account.mustChangePassword) {
+        redirect('/change-password');
+      }
+
+      redirect('/');
+    }
+
+    return { error: 'Invalid email or password.' };
+  } catch (err: any) {
+    if (err?.message === 'NEXT_REDIRECT' || err?.digest?.startsWith('NEXT_REDIRECT')) {
+      throw err;
+    }
+    console.error('[loginAction] Server error:', err);
+    return { error: 'Sign-in is temporarily unavailable. Please try again shortly.' };
   }
-
-  // Fallback demo accounts if running prototype mode
-  const demoFallback: Record<string, { role: UserRole; name: string }> = {
-    'superadmin@hope.com': { role: 'Superadmin', name: 'Michael Superadmin' },
-    'admin@hope.com': { role: 'Admin', name: 'Lisa Park' },
-    'user@hope.com': { role: 'User', name: 'Alex Rivera' },
-  };
-
-  if (demoFallback[email]) {
-    const info = demoFallback[email];
-    const cookieStore = await cookies();
-    cookieStore.set('hope_demo_role', info.role, { path: '/', httpOnly: true, maxAge: 86400 * 7, sameSite: 'lax' });
-    cookieStore.set('hope_demo_email', email, { path: '/', httpOnly: true, maxAge: 86400 * 7, sameSite: 'lax' });
-    cookieStore.set('hope_demo_name', info.name, { path: '/', httpOnly: true, maxAge: 86400 * 7, sameSite: 'lax' });
-    redirect('/');
-  }
-
-  return { error: 'Invalid email or password.' };
 }
 
 /**
@@ -145,93 +242,153 @@ export async function loginAction(formData: FormData) {
  * In the Student Guide (§1.2 & §3.1, Fig 3):
  * "New accounts are always created as User; Superadmin and Admin roles can only be assigned by existing administrators."
  */
-export async function registerAction(formData: FormData) {
-  const firstName = (formData.get('firstName') as string)?.trim() || '';
-  const lastName = (formData.get('lastName') as string)?.trim() || '';
-  const fullNameRaw = (formData.get('fullName') as string)?.trim();
-  const fullName = fullNameRaw || `${firstName} ${lastName}`.trim();
-  const email = (formData.get('email') as string)?.trim().toLowerCase();
-  const password = formData.get('password') as string;
-
-  if (!fullName || !email || !password) {
-    return { error: 'Please provide full name, email address, and password.' };
-  }
-
-  if (password.length < 4) {
-    return { error: 'Password must be at least 4 characters.' };
-  }
-
-  ensureAuthDb();
-
-  // 1. Prevent duplicate registrations
-  if (emailExists(email)) {
-    return { error: 'An account with this email address already exists. Please sign in.' };
-  }
-
-  // 2. Hash password with bcrypt salt
-  const passwordHash = await hashPassword(password);
-
-  // 3. New registrations strictly get role 'User'
+export async function registerAction(formData: FormData): Promise<{ 
+  error?: string; 
+  requiresVerification?: boolean; 
+  email?: string;
+}> {
   try {
-    insertAccount(email, passwordHash, fullName, 'User');
+    const firstName = (formData.get('firstName') as string)?.trim() || '';
+    const lastName = (formData.get('lastName') as string)?.trim() || '';
+    const fullNameRaw = (formData.get('fullName') as string)?.trim();
+    const fullName = fullNameRaw || `${firstName} ${lastName}`.trim();
+    const email = (formData.get('email') as string)?.trim().toLowerCase();
+    const password = formData.get('password') as string;
+
+    if (!fullName || !email || !password) {
+      return { error: 'Please provide full name, email address, and password.' };
+    }
+
+    if (password.length < 8) {
+      return { error: 'Password must be at least 8 characters.' };
+    }
+
+    try {
+      await ensureAuthDb();
+    } catch (dbErr: any) {
+      console.warn('[registerAction] Database init note:', dbErr?.message);
+    }
+
+    // 1. Prevent duplicate registrations in local DB
+    try {
+      if (await emailExists(email)) {
+        return { error: 'An account with this email address already exists. Please sign in.' };
+      }
+    } catch (existsErr: any) {
+      console.warn('[registerAction] Email check warning:', existsErr?.message);
+    }
+
+    // 2. Call Supabase Auth signUp with emailRedirectTo
+    const headerList = await headers();
+    const origin = headerList.get('origin') || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+    
+    let authData: any = null;
+    let authError: any = null;
+
+    try {
+      const supabase = await createClient();
+      const res = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: `${origin}/auth/callback`,
+          data: {
+            first_name: firstName,
+            last_name: lastName,
+            full_name: fullName,
+            role: 'User',
+          },
+        },
+      });
+      authData = res.data;
+      authError = res.error;
+    } catch (supErr: any) {
+      console.warn('[registerAction] Supabase signUp note:', supErr?.message);
+    }
+
+    if (authError) {
+      if (authError.message.toLowerCase().includes('already registered')) {
+        const localExists = await emailExists(email);
+        if (localExists) {
+          return { error: 'An account with this email address already exists. Please sign in.' };
+        }
+        // Account exists in Supabase from a previous attempt but not locally yet
+        authData = { user: { id: `usr-${Date.now()}` } };
+      } else {
+        return { error: authError.message };
+      }
+    }
+
+    // 3. Hash password with bcrypt salt for local USERS DB
+    const passwordHash = await hashPassword(password);
+    const requiresVerification = Boolean(authData?.user && !authData?.session);
+    const initialStatus: 'Active' | 'Inactive' = requiresVerification ? 'Inactive' : 'Active';
+
+    // 4. Save account to local USERS database
+    try {
+      const { getStampString } = await import('@/lib/auth-db');
+      const { getHopeDb } = await import('@/lib/hope-db');
+      const db = getHopeDb();
+      const userId = authData?.user?.id || `usr-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+      const stamp = getStampString(requiresVerification ? 'REGISTERED' : 'CREATED', 'system');
+      
+      const existing = await db.get<any>('SELECT userId FROM USERS WHERE LOWER(email) = ?', [email]);
+      if (existing) {
+        await db.run(`
+          UPDATE USERS 
+          SET firstName = ?, lastName = ?, passwordHash = ?, status = ?, stamp = ?
+          WHERE LOWER(email) = ?
+        `, [firstName || 'User', lastName || 'User', passwordHash, initialStatus, stamp, email]);
+      } else {
+        await db.run(`
+          INSERT INTO USERS (userId, firstName, lastName, email, passwordHash, role, isBlocked, status, stamp)
+          VALUES (?, ?, ?, ?, ?, 'User', 0, ?, ?)
+        `, [userId, firstName || 'User', lastName || 'User', email, passwordHash, initialStatus, stamp]);
+      }
+    } catch (err: any) {
+      if (err?.message?.includes('UNIQUE')) {
+        return { error: 'An account with this email address already exists. Please sign in.' };
+      }
+      return { error: err?.message || 'Failed to save account to database.' };
+    }
+
+    // 5. If verification is required, return success flag without setting session cookie
+    if (requiresVerification) {
+      return {
+        requiresVerification: true,
+        email,
+      };
+    }
+
+    // 6. Fallback: If confirm email is disabled, log in directly
+    const sessionToken = signSession({
+      userId: authData?.user?.id || `usr-${Date.now()}`,
+      email: email.toLowerCase(),
+      exp: Date.now() + SESSION_MAX_AGE * 1000,
+    });
+
+    const cookieStore = await cookies();
+    cookieStore.set(SESSION_COOKIE_NAME, sessionToken, {
+      path: '/',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: SESSION_MAX_AGE,
+      sameSite: 'lax',
+    });
+
+    redirect('/');
   } catch (err: any) {
-    return { error: err?.message || 'Failed to save account to database.' };
+    if (err?.message === 'NEXT_REDIRECT' || err?.digest?.startsWith('NEXT_REDIRECT')) {
+      throw err;
+    }
+    console.error('[registerAction] Unhandled registration error:', err);
+    return { error: 'An unexpected error occurred during registration. Please try again.' };
   }
-
-  // 4. Establish authenticated session immediately
-  const cookieStore = await cookies();
-  cookieStore.set('hope_demo_role', 'User', {
-    path: '/',
-    httpOnly: true,
-    maxAge: 86400 * 7,
-    sameSite: 'lax',
-  });
-  cookieStore.set('hope_demo_email', email, {
-    path: '/',
-    httpOnly: true,
-    maxAge: 86400 * 7,
-    sameSite: 'lax',
-  });
-  cookieStore.set('hope_demo_name', fullName, {
-    path: '/',
-    httpOnly: true,
-    maxAge: 86400 * 7,
-    sameSite: 'lax',
-  });
-
-  redirect('/');
 }
 
-/**
- * Instant demo login for prototype evaluation (§3.1, Fig 4).
- */
-export async function demoLoginAction(role: 'Superadmin' | 'Admin' | 'User' | UserRole) {
-  const cookieStore = await cookies();
-  const emailMap: Record<string, { email: string; name: string; role: UserRole }> = {
-    Superadmin: { email: 'superadmin@hope.com', name: 'Michael Superadmin', role: 'Superadmin' },
-    Admin: { email: 'admin@hope.com', name: 'Lisa Park', role: 'Admin' },
-    User: { email: 'user@hope.com', name: 'Alex Rivera', role: 'User' },
-    admin: { email: 'admin@hope.com', name: 'Lisa Park', role: 'Admin' },
-    sales: { email: 'user@hope.com', name: 'Alex Rivera', role: 'User' },
-    cashier: { email: 'user@hope.com', name: 'Alex Rivera', role: 'User' },
-  };
-
-  const info = emailMap[role] || emailMap.User;
-  cookieStore.set('hope_demo_role', info.role, { path: '/', httpOnly: true, maxAge: 86400 * 7, sameSite: 'lax' });
-  cookieStore.set('hope_demo_email', info.email, { path: '/', httpOnly: true, maxAge: 86400 * 7, sameSite: 'lax' });
-  cookieStore.set('hope_demo_name', info.name, { path: '/', httpOnly: true, maxAge: 86400 * 7, sameSite: 'lax' });
-
-  redirect('/');
-}
-
-/**
- * Destroys session and returns to public landing / login.
- */
 export async function logoutAction() {
   const cookieStore = await cookies();
-  cookieStore.delete('hope_demo_role');
-  cookieStore.delete('hope_demo_email');
-  cookieStore.delete('hope_demo_name');
+  cookieStore.delete(SESSION_COOKIE_NAME);
 
   try {
     const supabase = await createClient();
@@ -253,8 +410,11 @@ export async function fetchUsersAction(): Promise<{ users: UserAccount[]; error?
     if (!user || (user.role !== 'Superadmin' && user.role !== 'Admin' && user.role !== 'admin')) {
       return { users: [], error: 'Access denied: Administrator privileges required.' };
     }
+    if (user.mustChangePassword) {
+      return { users: [], error: 'Password change required: You must change your temporary password first.' };
+    }
 
-    const users = getAllUsers(user.role);
+    const users = await getAllUsers(user.role);
     return { users };
   } catch (err: any) {
     return { users: [], error: err?.message || 'Failed to fetch users.' };
@@ -272,6 +432,13 @@ export async function checkUserPermission(
   const user = await getCurrentUser();
   if (!user) {
     return { authorized: false, user: null, error: 'Unauthorized: Please sign in.' };
+  }
+  if (user.mustChangePassword) {
+    return {
+      authorized: false,
+      user,
+      error: 'Password change required: You must change your temporary password before performing any actions.',
+    };
   }
   const role = user.role.toLowerCase();
   if (role === 'superadmin' || role === 'admin') {
@@ -294,7 +461,7 @@ export async function toggleBlockUserAction(targetUserId: string): Promise<{ suc
       return { success: false, error: 'Access denied: Only administrators can block or unblock users.' };
     }
 
-    const res = toggleBlockUser(targetUserId, currentUser.fullName || 'Admin');
+    const res = await toggleBlockUser(targetUserId, currentUser.fullName || 'Admin');
     revalidatePath('/users');
     return res;
   } catch (err: any) {
@@ -309,8 +476,9 @@ export async function updateUserRightsAction(targetUserId: string, rightCodes: s
       return { success: false, error: 'Access denied: Only administrators can update user rights.' };
     }
 
-    const res = updateUserRights(targetUserId, rightCodes, currentUser.fullName || 'Admin');
+    const res = await updateUserRights(targetUserId, rightCodes, currentUser.fullName || 'Admin');
     revalidatePath('/users');
+    revalidatePath('/', 'layout');
     return res;
   } catch (err: any) {
     return { success: false, error: err?.message || 'Failed to update user rights.' };
@@ -334,12 +502,12 @@ export async function createUserAction(data: {
       return { success: false, error: 'All fields (First Name, Last Name, Email, Password) are required.' };
     }
 
-    if (data.password.length < 4) {
-      return { success: false, error: 'Password must be at least 4 characters.' };
+    if (data.password.length < 8) {
+      return { success: false, error: 'Password must be at least 8 characters.' };
     }
 
     const passwordHash = await hashPassword(data.password);
-    const res = adminCreateUser(
+    const res = await adminCreateUser(
       data.firstName,
       data.lastName,
       data.email,
@@ -362,7 +530,7 @@ export async function updateUserProfileAction(data: {
   firstName: string;
   lastName: string;
   email: string;
-  role?: 'User' | 'Admin';
+  role?: UserRole;
   newPassword?: string;
 }): Promise<{ success: boolean; error?: string }> {
   try {
@@ -377,13 +545,13 @@ export async function updateUserProfileAction(data: {
 
     let passwordHash: string | undefined;
     if (data.newPassword && data.newPassword.trim()) {
-      if (data.newPassword.trim().length < 4) {
-        return { success: false, error: 'New password must be at least 4 characters.' };
+      if (data.newPassword.trim().length < 8) {
+        return { success: false, error: 'New password must be at least 8 characters.' };
       }
       passwordHash = await hashPassword(data.newPassword.trim());
     }
 
-    const res = updateUserProfile(
+    const res = await updateUserProfile(
       data.userId,
       data.firstName,
       data.lastName,
@@ -399,5 +567,261 @@ export async function updateUserProfileAction(data: {
     return res;
   } catch (err: any) {
     return { success: false, error: err?.message || 'Failed to update user profile.' };
+  }
+}
+
+/**
+ * Admin-initiated password reset:
+ * - Checks caller role from database (not just cookie).
+ * - Admin can reset only role 'User'.
+ * - Superadmin can reset 'Admin' or 'Superadmin'.
+ * - Nobody can reset their own account.
+ * - Generates 12+ char temporary password with crypto.randomBytes, hashes with bcrypt (cost 10).
+ * - Sets mustChangePassword = 1 and increments sessionVersion to invalidate existing sessions.
+ * - Returns tempPassword to caller for one-time display in modal.
+ */
+export async function requestPasswordResetAction(email: string): Promise<{
+  success: boolean;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!cleanEmail) {
+      return { success: false, error: 'Enter your email address.' };
+    }
+
+    const headerList = await headers();
+    const host = headerList.get('x-forwarded-host') || headerList.get('host');
+    const proto = headerList.get('x-forwarded-proto') || 'https';
+    const siteUrl = host
+      ? `${proto}://${host}`
+      : (process.env.NEXT_PUBLIC_SITE_URL ?? 'https://electrondb.vercel.app');
+
+    const supabase = await createClient();
+
+    const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+      redirectTo: `${siteUrl}/auth/confirm?type=recovery`,
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return {
+      success: true,
+      message: `If an account exists for ${cleanEmail}, a password recovery link was sent to your Gmail.`,
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to send password reset email.' };
+  }
+}
+
+/**
+ * Admin-initiated password reset via Supabase Email Verification:
+ * Sends an official password recovery link to the user's Gmail address.
+ */
+export async function adminSendPasswordResetEmailAction(email: string): Promise<{
+  success: boolean;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const sessionUser = await getCurrentUser();
+    if (!sessionUser) {
+      return { success: false, error: 'Unauthorized: Please sign in.' };
+    }
+
+    if (sessionUser.role !== 'Superadmin' && sessionUser.role !== 'Admin') {
+      return { success: false, error: 'Access denied: Only administrators can trigger password resets.' };
+    }
+
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!cleanEmail) {
+      return { success: false, error: 'Target user email is required.' };
+    }
+
+    const headerList = await headers();
+    const host = headerList.get('x-forwarded-host') || headerList.get('host');
+    const proto = headerList.get('x-forwarded-proto') || 'https';
+    const siteUrl = host
+      ? `${proto}://${host}`
+      : (process.env.NEXT_PUBLIC_SITE_URL ?? 'https://electrondb.vercel.app');
+
+    const supabase = await createClient();
+
+    const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+      redirectTo: `${siteUrl}/auth/confirm?type=recovery`,
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return {
+      success: true,
+      message: `Password reset verification email has been sent to ${cleanEmail}.`,
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to send password reset email.' };
+  }
+}
+
+export async function updatePasswordFromRecoveryAction(newPassword: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (!newPassword || newPassword.trim().length < 8) {
+      return { success: false, error: 'Password must be at least 8 characters long.' };
+    }
+
+    const supabase = await createClient();
+    const { error } = await supabase.auth.updateUser({ password: newPassword.trim() });
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to update password.' };
+  }
+}
+
+export async function adminResetPasswordAction(targetUserId: string): Promise<{
+  success: boolean;
+  tempPassword?: string;
+  error?: string;
+}> {
+  try {
+    const sessionUser = await getCurrentUser();
+    if (!sessionUser) {
+      return { success: false, error: 'Unauthorized: Please sign in.' };
+    }
+
+    // Verify caller role directly against database
+    const caller = await findAccountById(sessionUser.id);
+    if (!caller || (caller.role !== 'Superadmin' && caller.role !== 'Admin')) {
+      return { success: false, error: 'Access denied: Only administrators can reset passwords.' };
+    }
+
+    if (caller.userId === targetUserId) {
+      return { success: false, error: 'You cannot reset your own password. Please use Change Password instead.' };
+    }
+
+    const targetUser = await findAccountById(targetUserId);
+    if (!targetUser) {
+      return { success: false, error: 'Target user account not found.' };
+    }
+
+    // Admin may reset only role User; only Superadmin may reset Admin or Superadmin
+    if (caller.role === 'Admin' && targetUser.role !== 'User') {
+      return { success: false, error: 'Administrators may only reset passwords for User accounts.' };
+    }
+
+    // Generate 12+ character random temporary password
+    const rawRandom = crypto.randomBytes(9).toString('base64url');
+    const tempPassword = `Tmp-${rawRandom}`;
+    const tempPasswordHash = await hashPassword(tempPassword);
+
+    const res = await adminResetUserPassword(
+      targetUserId,
+      tempPasswordHash,
+      caller.fullName || caller.role
+    );
+
+    if (!res.success) {
+      return { success: false, error: res.error || 'Failed to reset password.' };
+    }
+
+    revalidatePath('/users');
+    return { success: true, tempPassword };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Unexpected error during password reset.' };
+  }
+}
+
+/**
+ * Self-service / forced change password for signed-in users:
+ * - Validates current password against database hash.
+ * - Requires new password >= 8 chars and different from old password.
+ * - Clears mustChangePassword = 0, increments sessionVersion to invalidate old tokens.
+ * - Re-issues session cookie with the new sessionVersion.
+ */
+export async function changePasswordAction(formData: FormData): Promise<{ success: boolean; error?: string }> {
+  try {
+    const sessionUser = await getCurrentUser();
+    if (!sessionUser) {
+      return { success: false, error: 'Please sign in to change your password.' };
+    }
+
+    const currentPassword = ((formData.get('currentPassword') as string) || '').trim();
+    const newPassword = ((formData.get('newPassword') as string) || '').trim();
+    const confirmPassword = ((formData.get('confirmPassword') as string) || '').trim();
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      return { success: false, error: 'All fields are required.' };
+    }
+
+    if (newPassword.length < 8) {
+      return { success: false, error: 'New password must be at least 8 characters long.' };
+    }
+
+    if (newPassword !== confirmPassword) {
+      return { success: false, error: 'New password and confirm password do not match.' };
+    }
+
+    // Fetch user with passwordHash directly from database
+    const account = await findAccountById(sessionUser.id);
+    if (!account) {
+      return { success: false, error: 'User account not found.' };
+    }
+
+    // Verify current password
+    const isCurrentValid = await verifyPassword(currentPassword, account.passwordHash);
+    if (!isCurrentValid) {
+      return { success: false, error: 'Current password is incorrect.' };
+    }
+
+    // New password must be different from current password
+    if (currentPassword === newPassword) {
+      return { success: false, error: 'New password must be different from the old password.' };
+    }
+
+    const newPasswordHash = await hashPassword(newPassword);
+    const updateRes = await updateUserPassword(
+      account.userId,
+      newPasswordHash,
+      account.fullName || account.email
+    );
+
+    if (!updateRes.success) {
+      return { success: false, error: updateRes.error || 'Failed to update password.' };
+    }
+
+    // Fetch fresh sessionVersion
+    const updatedAccount = await findAccountById(account.userId);
+    const newVersion = updatedAccount?.sessionVersion ?? ((account.sessionVersion ?? 1) + 1);
+
+    // Re-issue session cookie with new sessionVersion
+    const sessionToken = signSession({
+      userId: account.userId,
+      email: account.email,
+      sessionVersion: newVersion,
+      exp: Date.now() + SESSION_MAX_AGE * 1000,
+    });
+
+    const cookieStore = await cookies();
+    cookieStore.set(SESSION_COOKIE_NAME, sessionToken, {
+      path: '/',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: SESSION_MAX_AGE,
+      sameSite: 'lax',
+    });
+
+    redirect('/');
+  } catch (err: any) {
+    if (err?.message === 'NEXT_REDIRECT' || err?.digest?.startsWith('NEXT_REDIRECT')) {
+      throw err;
+    }
+    return { success: false, error: err?.message || 'Failed to change password.' };
   }
 }

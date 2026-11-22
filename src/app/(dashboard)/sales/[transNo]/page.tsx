@@ -6,7 +6,6 @@ import { canAccess } from '@/lib/permissions';
 import { getSaleDetailData } from '@/lib/data/sales';
 import { formatPHP, formatDate } from '@/lib/utils';
 import { PrintButton } from '@/components/sales/PrintButton';
-import { SaleRecordPaymentButton } from '@/components/sales/SaleRecordPaymentButton';
 import { BRAND } from '@/lib/brand';
 import { ArrowLeft, CreditCard, Receipt, ExternalLink, ShoppingBag } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
@@ -44,7 +43,12 @@ export default async function SaleDetailPage({ params }: PageProps) {
   }
 
   const { sale, items, payments } = saleData;
-  const canRecordPayment = user?.role === 'admin' || user?.role === 'cashier';
+  const role = (user?.role || '').toLowerCase();
+  const canRecordPayment =
+    role === 'superadmin' ||
+    role === 'admin' ||
+    role === 'cashier' ||
+    Boolean(user?.rights?.some((r) => r.includes('sale') || r.includes('payment')));
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 pt-2 sm:pt-4">
@@ -59,9 +63,6 @@ export default async function SaleDetailPage({ params }: PageProps) {
         </Link>
 
         <div className="flex items-center gap-2">
-          {canRecordPayment && (
-            <SaleRecordPaymentButton transNo={sale.transNo} />
-          )}
           <PrintButton />
         </div>
       </div>
@@ -186,9 +187,7 @@ export default async function SaleDetailPage({ params }: PageProps) {
               <Receipt className="h-4 w-4 text-[#52615B]" />
               <span>Official Receipts ({payments.length})</span>
             </h2>
-            {canRecordPayment && (
-              <SaleRecordPaymentButton transNo={sale.transNo} />
-            )}
+
           </div>
 
           {payments.length === 0 ? (
@@ -210,9 +209,9 @@ export default async function SaleDetailPage({ params }: PageProps) {
                   {payments.map((p) => (
                     <tr key={p.orNo} className="hover:bg-[#F5F6F4]">
                       <td className="py-2.5 px-3 font-semibold text-[#245B48] font-mono">
-                        <Link href={`/receipts/${p.orNo}`} className="underline hover:text-[#1C4939]">
+                        <span>
                           OR #{p.orNo}
-                        </Link>
+                        </span>
                       </td>
                       <td className="py-2.5 px-3 text-[#17231F] font-sans tabular-nums">
                         {formatDate(p.payDate)}
@@ -220,14 +219,8 @@ export default async function SaleDetailPage({ params }: PageProps) {
                       <td className="py-2.5 px-3 text-right font-mono tabular-nums font-semibold text-[#17231F]">
                         {formatPHP(p.amount)}
                       </td>
-                      <td className="py-2.5 px-3 text-center">
-                        <Link
-                          href={`/receipts/${p.orNo}`}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium text-[#245B48] hover:underline"
-                        >
-                          <span>Print OR</span>
-                          <ExternalLink className="w-3 h-3 text-[#245B48]" />
-                        </Link>
+                      <td className="py-2.5 px-3 text-center font-mono text-[11px] text-[#52615B]">
+                        #{p.orNo}
                       </td>
                     </tr>
                   ))}

@@ -1433,7 +1433,7 @@ SELECT
     (DATE_PART('year', now()) - DATE_PART('year', e.hiredate))::INT AS "yearsOfService"
 FROM employee e
 LEFT JOIN LATERAL (
-    SELECT jh1.deptcode, jh1.jobcode, jh1.salary
+    SELECT jh1.deptcode, jh1.jobcode, jh1.salary, jh1.effdate
     FROM jobhistory jh1
     WHERE jh1.empno = e.empno
     ORDER BY jh1.effdate DESC

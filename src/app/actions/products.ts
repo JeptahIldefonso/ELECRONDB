@@ -2,11 +2,10 @@
 
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { getHopeDb, type DatabaseSync } from '@/lib/hope-db';
-import { createClient } from '@/lib/supabase/server';
+import { getHopeDb, sanitizeDbError, isDatabaseReadOnly, type HopeDatabase } from '@/lib/hope-db';
 import { getCurrentUser, checkUserPermission } from './auth';
 
-function getSqliteDb(): DatabaseSync {
+function getSqliteDb(): HopeDatabase {
   return getHopeDb();
 }
 
@@ -15,19 +14,6 @@ function getStampString(action: 'CREATED' | 'EDITED' | 'DELETED' | 'RESTORED', b
   const dateStr = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
   const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Manila' });
   return `${action} ${byUser} ${dateStr} ${timeStr}`;
-}
-
-function getManilaToday(): string {
-  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
-}
-
-function isSupabaseLive(): boolean {
-  return Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-    !process.env.NEXT_PUBLIC_SUPABASE_URL.includes('your-project') &&
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY &&
-    !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY.includes('your-anon')
-  );
 }
 
 // ========================================================================
@@ -56,6 +42,7 @@ const priceRecordSchema = z.object({
   prodCode: z.string().trim().min(1, 'Product code is required').max(6),
   effDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Valid effective date (YYYY-MM-DD) is required'),
   unitPrice: z.number().positive('Unit price must be greater than zero'),
+  allowUpdate: z.boolean().optional(),
 });
 
 export type AddProductInput = z.infer<typeof addProductSchema>;
@@ -69,6 +56,10 @@ export type CorrectPriceInput = { prodCode: string; unitPrice: number };
 // ========================================================================
 export async function addProductAction(input: AddProductInput) {
   try {
+    if (isDatabaseReadOnly()) {
+      return { error: 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso configured.' };
+    }
+
     const auth = await checkUserPermission('add_product');
     if (!auth.authorized) {
       return { error: auth.error || 'Access denied: Missing right add_product.' };
@@ -79,63 +70,37 @@ export async function addProductAction(input: AddProductInput) {
     const code = validated.prodCode.toUpperCase();
     const stampStr = getStampString('CREATED', userName);
 
-    if (isSupabaseLive()) {
-      try {
-        const supabase = await createClient();
-        const { error } = await supabase.from('PRODUCT').insert({
-          prodCode: code,
-          description: validated.description,
-          unit: validated.unit,
-          is_deleted: 0,
-          stamp: stampStr,
-        });
-
-        if (error) return { error: error.message };
-
-        if (validated.initialPrice && validated.effDate) {
-          await supabase.from('PRICEHIST').insert({
-            effDate: validated.effDate,
-            prodCode: code,
-            unitPrice: validated.initialPrice,
-            is_deleted: 0,
-            stamp: stampStr,
-          });
-        }
-
-        revalidatePath('/products');
-        return { success: true, prodCode: code };
-      } catch (err: any) {
-        return { error: err?.message || 'Database error adding product.' };
-      }
-    }
-
-    // SQLite implementation
     const db = getSqliteDb();
 
     // Check duplicate prodCode
-    const existingCode = db.prepare('SELECT prodCode FROM PRODUCT WHERE prodCode = ?').get(code);
+    const existingCode = await db.get('SELECT prodCode FROM PRODUCT WHERE prodCode = ?', [code]);
     if (existingCode) {
       return { error: `Product code "${code}" already exists.` };
     }
 
-    db.prepare(`
-      INSERT INTO PRODUCT (prodCode, description, unit, is_deleted, stamp)
-      VALUES (?, ?, ?, 0, ?)
-    `).run(code, validated.description, validated.unit, stampStr);
+    // Atomic insert of product and initial price using LibSQL batch
+    const batchStatements: Array<{ sql: string; args: any[] }> = [
+      {
+        sql: `INSERT INTO PRODUCT (prodCode, description, unit, is_deleted, stamp) VALUES (?, ?, ?, false, ?)`,
+        args: [code, validated.description, validated.unit, stampStr],
+      },
+    ];
 
     if (validated.initialPrice && validated.effDate) {
-      db.prepare(`
-        INSERT INTO PRICEHIST (effDate, prodCode, unitPrice, is_deleted, stamp)
-        VALUES (?, ?, ?, 0, ?)
-      `).run(validated.effDate, code, validated.initialPrice, stampStr);
+      batchStatements.push({
+        sql: `INSERT INTO PRICEHIST (effDate, prodCode, unitPrice, is_deleted, stamp) VALUES (?, ?, ?, false, ?)`,
+        args: [validated.effDate, code, validated.initialPrice, stampStr],
+      });
     }
+
+    await db.batch(batchStatements);
 
     // Audit log
     try {
-      db.prepare(`
+      await db.run(`
         INSERT INTO audit_log (table_name, action, record_key, new_values, action_by)
         VALUES ('PRODUCT', 'ADD', ?, ?, ?)
-      `).run(code, JSON.stringify({ description: validated.description, unit: validated.unit }), userName);
+      `, [code, JSON.stringify({ description: validated.description, unit: validated.unit }), userName]);
     } catch {
       // Non-blocking
     }
@@ -143,10 +108,7 @@ export async function addProductAction(input: AddProductInput) {
     revalidatePath('/products');
     return { success: true, prodCode: code };
   } catch (err: any) {
-    if (err instanceof z.ZodError) {
-      return { error: err.errors[0]?.message || 'Invalid product parameters' };
-    }
-    return { error: err?.message || 'Failed to add product' };
+    return { error: sanitizeDbError(err, 'Failed to add product.') };
   }
 }
 
@@ -155,6 +117,10 @@ export async function addProductAction(input: AddProductInput) {
 // ========================================================================
 export async function updateProductAction(input: UpdateProductInput) {
   try {
+    if (isDatabaseReadOnly()) {
+      return { error: 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso configured.' };
+    }
+
     const auth = await checkUserPermission('edit_product');
     if (!auth.authorized) {
       return { error: auth.error || 'Access denied: Missing right edit_product.' };
@@ -165,50 +131,29 @@ export async function updateProductAction(input: UpdateProductInput) {
     const code = validated.prodCode.toUpperCase();
     const stampStr = getStampString('EDITED', userName);
 
-    if (isSupabaseLive()) {
-      try {
-        const supabase = await createClient();
-        const { error } = await supabase
-          .from('PRODUCT')
-          .update({
-            description: validated.description,
-            unit: validated.unit,
-            stamp: stampStr,
-          })
-          .eq('prodCode', code);
-
-        if (error) return { error: error.message };
-        revalidatePath('/products');
-        return { success: true };
-      } catch (err: any) {
-        return { error: err?.message || 'Database error updating product' };
-      }
-    }
-
-    // SQLite implementation
     const db = getSqliteDb();
-    const existing = db.prepare('SELECT * FROM PRODUCT WHERE prodCode = ?').get(code) as any;
+    const existing = await db.get<any>('SELECT * FROM PRODUCT WHERE prodCode = ?', [code]);
     if (!existing) {
       return { error: 'Product not found.' };
     }
 
-    db.prepare(`
+    await db.run(`
       UPDATE PRODUCT
       SET description = ?, unit = ?, stamp = ?
       WHERE prodCode = ?
-    `).run(validated.description, validated.unit, stampStr, code);
+    `, [validated.description, validated.unit, stampStr, code]);
 
     // Audit log
     try {
-      db.prepare(`
+      await db.run(`
         INSERT INTO audit_log (table_name, action, record_key, old_values, new_values, action_by)
         VALUES ('PRODUCT', 'EDIT', ?, ?, ?, ?)
-      `).run(
+      `, [
         code,
         JSON.stringify({ description: existing.description, unit: existing.unit }),
         JSON.stringify({ description: validated.description, unit: validated.unit }),
         userName
-      );
+      ]);
     } catch {
       // Non-blocking
     }
@@ -216,10 +161,7 @@ export async function updateProductAction(input: UpdateProductInput) {
     revalidatePath('/products');
     return { success: true };
   } catch (err: any) {
-    if (err instanceof z.ZodError) {
-      return { error: err.errors[0]?.message || 'Invalid parameters' };
-    }
-    return { error: err?.message || 'Failed to update product' };
+    return { error: sanitizeDbError(err, 'Failed to update product.') };
   }
 }
 
@@ -228,6 +170,10 @@ export async function updateProductAction(input: UpdateProductInput) {
 // ========================================================================
 export async function deleteProductAction(prodCode: string) {
   try {
+    if (isDatabaseReadOnly()) {
+      return { error: 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso configured.' };
+    }
+
     const auth = await checkUserPermission('delete_product');
     if (!auth.authorized) {
       return { error: auth.error || 'Access denied: Missing right delete_product.' };
@@ -238,7 +184,7 @@ export async function deleteProductAction(prodCode: string) {
     const stampStr = getStampString('DELETED', userName);
 
     const db = getSqliteDb();
-    const existing = db.prepare('SELECT is_deleted FROM PRODUCT WHERE prodCode = ?').get(cleanCode) as any;
+    const existing = await db.get<any>('SELECT is_deleted FROM PRODUCT WHERE prodCode = ?', [cleanCode]);
     if (!existing) {
       return { error: `Product #${cleanCode} was not found.` };
     }
@@ -247,17 +193,17 @@ export async function deleteProductAction(prodCode: string) {
       return { error: `Product #${cleanCode} is already inactive.` };
     }
 
-    db.prepare(`
+    await db.run(`
       UPDATE PRODUCT 
       SET is_deleted = 1, stamp = ?
       WHERE prodCode = ?
-    `).run(stampStr, cleanCode);
+    `, [stampStr, cleanCode]);
 
     try {
-      db.prepare(`
+      await db.run(`
         INSERT INTO audit_log (table_name, action, record_key, action_by)
         VALUES ('PRODUCT', 'DELETE', ?, ?)
-      `).run(cleanCode, userName);
+      `, [cleanCode, userName]);
     } catch {
       // Non-blocking
     }
@@ -265,12 +211,16 @@ export async function deleteProductAction(prodCode: string) {
     revalidatePath('/products');
     return { success: true };
   } catch (err: any) {
-    return { error: err?.message || 'Failed to soft-delete product.' };
+    return { error: sanitizeDbError(err, 'Failed to soft-delete product.') };
   }
 }
 
 export async function restoreProductAction(prodCode: string) {
   try {
+    if (isDatabaseReadOnly()) {
+      return { error: 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso configured.' };
+    }
+
     const user = await getCurrentUser();
     const role = (user?.role || '').toLowerCase();
     if (role !== 'admin' && role !== 'superadmin') {
@@ -282,7 +232,7 @@ export async function restoreProductAction(prodCode: string) {
     const stampStr = getStampString('RESTORED', userName);
 
     const db = getSqliteDb();
-    const existing = db.prepare('SELECT is_deleted FROM PRODUCT WHERE prodCode = ?').get(cleanCode) as any;
+    const existing = await db.get<any>('SELECT is_deleted FROM PRODUCT WHERE prodCode = ?', [cleanCode]);
     if (!existing) {
       return { error: `Product #${cleanCode} was not found.` };
     }
@@ -291,17 +241,17 @@ export async function restoreProductAction(prodCode: string) {
       return { error: `Product #${cleanCode} is already active.` };
     }
 
-    db.prepare(`
+    await db.run(`
       UPDATE PRODUCT 
       SET is_deleted = 0, stamp = ?
       WHERE prodCode = ?
-    `).run(stampStr, cleanCode);
+    `, [stampStr, cleanCode]);
 
     try {
-      db.prepare(`
+      await db.run(`
         INSERT INTO audit_log (table_name, action, record_key, action_by)
         VALUES ('PRODUCT', 'RESTORE', ?, ?)
-      `).run(cleanCode, userName);
+      `, [cleanCode, userName]);
     } catch {
       // Non-blocking
     }
@@ -309,7 +259,7 @@ export async function restoreProductAction(prodCode: string) {
     revalidatePath('/products');
     return { success: true };
   } catch (err: any) {
-    return { error: err?.message || 'Failed to restore product.' };
+    return { error: sanitizeDbError(err, 'Failed to restore product.') };
   }
 }
 
@@ -318,6 +268,10 @@ export async function restoreProductAction(prodCode: string) {
 // ========================================================================
 export async function addPriceAction(input: PriceRecordInput) {
   try {
+    if (isDatabaseReadOnly()) {
+      return { error: 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso configured.' };
+    }
+
     const auth = await checkUserPermission('add_price');
     if (!auth.authorized) {
       return { error: auth.error || 'Access denied: Missing right add_price.' };
@@ -331,25 +285,48 @@ export async function addPriceAction(input: PriceRecordInput) {
     const db = getSqliteDb();
 
     // Check if price record with same effDate already exists
-    const existing = db.prepare('SELECT 1 FROM PRICEHIST WHERE prodCode = ? AND effDate = ?').get(code, validated.effDate);
+    const existing = await db.get<any>('SELECT * FROM PRICEHIST WHERE prodCode = ? AND effDate = ?', [code, validated.effDate]);
     if (existing) {
+      if (validated.allowUpdate) {
+        const editStampStr = getStampString('EDITED', userName);
+        await db.run(`
+          UPDATE PRICEHIST
+          SET unitPrice = ?, is_deleted = 0, stamp = ?
+          WHERE prodCode = ? AND effDate = ?
+        `, [validated.unitPrice, editStampStr, code, validated.effDate]);
+
+        try {
+          await db.run(`
+            INSERT INTO audit_log (table_name, action, record_key, old_values, new_values, action_by)
+            VALUES ('PRICEHIST', 'EDIT', ?, ?, ?, ?)
+          `, [
+            `${code}:${validated.effDate}`,
+            JSON.stringify({ unitPrice: existing.unitPrice }),
+            JSON.stringify({ unitPrice: validated.unitPrice }),
+            userName
+          ]);
+        } catch {}
+
+        revalidatePath('/products');
+        return { success: true, updated: true };
+      }
       return { error: `A price record already exists for ${code} on ${validated.effDate}. Edit that record instead.` };
     }
 
-    db.prepare(`
+    await db.run(`
       INSERT INTO PRICEHIST (effDate, prodCode, unitPrice, is_deleted, stamp)
-      VALUES (?, ?, ?, 0, ?)
-    `).run(validated.effDate, code, validated.unitPrice, stampStr);
+      VALUES (?, ?, ?, false, ?)
+    `, [validated.effDate, code, validated.unitPrice, stampStr]);
 
     try {
-      db.prepare(`
+      await db.run(`
         INSERT INTO audit_log (table_name, action, record_key, new_values, action_by)
         VALUES ('PRICEHIST', 'ADD', ?, ?, ?)
-      `).run(
+      `, [
         `${code}:${validated.effDate}`,
         JSON.stringify({ unitPrice: validated.unitPrice }),
         userName
-      );
+      ]);
     } catch {
       // Non-blocking
     }
@@ -357,15 +334,16 @@ export async function addPriceAction(input: PriceRecordInput) {
     revalidatePath('/products');
     return { success: true };
   } catch (err: any) {
-    if (err instanceof z.ZodError) {
-      return { error: err.errors[0]?.message || 'Invalid price input' };
-    }
-    return { error: err?.message || 'Failed to add price record' };
+    return { error: sanitizeDbError(err, 'Failed to add price record.') };
   }
 }
 
 export async function updatePriceAction(input: PriceRecordInput) {
   try {
+    if (isDatabaseReadOnly()) {
+      return { error: 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso configured.' };
+    }
+
     const auth = await checkUserPermission('edit_price');
     if (!auth.authorized) {
       return { error: auth.error || 'Access denied: Missing right edit_price.' };
@@ -377,27 +355,27 @@ export async function updatePriceAction(input: PriceRecordInput) {
     const stampStr = getStampString('EDITED', userName);
 
     const db = getSqliteDb();
-    const existing = db.prepare('SELECT * FROM PRICEHIST WHERE prodCode = ? AND effDate = ?').get(code, validated.effDate) as any;
+    const existing = await db.get<any>('SELECT * FROM PRICEHIST WHERE prodCode = ? AND effDate = ?', [code, validated.effDate]);
     if (!existing) {
       return { error: 'Price record not found.' };
     }
 
-    db.prepare(`
+    await db.run(`
       UPDATE PRICEHIST
       SET unitPrice = ?, stamp = ?
       WHERE prodCode = ? AND effDate = ?
-    `).run(validated.unitPrice, stampStr, code, validated.effDate);
+    `, [validated.unitPrice, stampStr, code, validated.effDate]);
 
     try {
-      db.prepare(`
+      await db.run(`
         INSERT INTO audit_log (table_name, action, record_key, old_values, new_values, action_by)
         VALUES ('PRICEHIST', 'EDIT', ?, ?, ?, ?)
-      `).run(
+      `, [
         `${code}:${validated.effDate}`,
         JSON.stringify({ unitPrice: existing.unitPrice }),
         JSON.stringify({ unitPrice: validated.unitPrice }),
         userName
-      );
+      ]);
     } catch {
       // Non-blocking
     }
@@ -405,15 +383,16 @@ export async function updatePriceAction(input: PriceRecordInput) {
     revalidatePath('/products');
     return { success: true };
   } catch (err: any) {
-    if (err instanceof z.ZodError) {
-      return { error: err.errors[0]?.message || 'Invalid price input' };
-    }
-    return { error: err?.message || 'Failed to update price' };
+    return { error: sanitizeDbError(err, 'Failed to update price record.') };
   }
 }
 
 export async function deletePriceAction(prodCode: string, effDate: string) {
   try {
+    if (isDatabaseReadOnly()) {
+      return { error: 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso configured.' };
+    }
+
     const auth = await checkUserPermission('delete_price');
     if (!auth.authorized) {
       return { error: auth.error || 'Access denied: Missing right delete_price.' };
@@ -425,22 +404,22 @@ export async function deletePriceAction(prodCode: string, effDate: string) {
     const stampStr = getStampString('DELETED', userName);
 
     const db = getSqliteDb();
-    const existing = db.prepare('SELECT is_deleted FROM PRICEHIST WHERE prodCode = ? AND effDate = ?').get(cleanCode, cleanDate) as any;
+    const existing = await db.get<any>('SELECT is_deleted FROM PRICEHIST WHERE prodCode = ? AND effDate = ?', [cleanCode, cleanDate]);
     if (!existing) {
       return { error: 'Price record not found.' };
     }
 
-    db.prepare(`
+    await db.run(`
       UPDATE PRICEHIST
       SET is_deleted = 1, stamp = ?
       WHERE prodCode = ? AND effDate = ?
-    `).run(stampStr, cleanCode, cleanDate);
+    `, [stampStr, cleanCode, cleanDate]);
 
     try {
-      db.prepare(`
+      await db.run(`
         INSERT INTO audit_log (table_name, action, record_key, action_by)
         VALUES ('PRICEHIST', 'DELETE', ?, ?)
-      `).run(`${cleanCode}:${cleanDate}`, userName);
+      `, [`${cleanCode}:${cleanDate}`, userName]);
     } catch {
       // Non-blocking
     }
@@ -448,12 +427,16 @@ export async function deletePriceAction(prodCode: string, effDate: string) {
     revalidatePath('/products');
     return { success: true };
   } catch (err: any) {
-    return { error: err?.message || 'Failed to soft-delete price record.' };
+    return { error: sanitizeDbError(err, 'Failed to soft-delete price record.') };
   }
 }
 
 export async function restorePriceAction(prodCode: string, effDate: string) {
   try {
+    if (isDatabaseReadOnly()) {
+      return { error: 'This deployed environment is in read-only mode to protect canonical data. Writes are available in local development or with Turso configured.' };
+    }
+
     const user = await getCurrentUser();
     const role = (user?.role || 'admin').toLowerCase();
     if (!['admin', 'superadmin', 'sales'].includes(role)) {
@@ -466,22 +449,22 @@ export async function restorePriceAction(prodCode: string, effDate: string) {
     const stampStr = getStampString('RESTORED', userName);
 
     const db = getSqliteDb();
-    const existing = db.prepare('SELECT is_deleted FROM PRICEHIST WHERE prodCode = ? AND effDate = ?').get(cleanCode, cleanDate) as any;
+    const existing = await db.get<any>('SELECT is_deleted FROM PRICEHIST WHERE prodCode = ? AND effDate = ?', [cleanCode, cleanDate]);
     if (!existing) {
       return { error: 'Price record not found.' };
     }
 
-    db.prepare(`
+    await db.run(`
       UPDATE PRICEHIST
       SET is_deleted = 0, stamp = ?
       WHERE prodCode = ? AND effDate = ?
-    `).run(stampStr, cleanCode, cleanDate);
+    `, [stampStr, cleanCode, cleanDate]);
 
     try {
-      db.prepare(`
+      await db.run(`
         INSERT INTO audit_log (table_name, action, record_key, action_by)
         VALUES ('PRICEHIST', 'RESTORE', ?, ?)
-      `).run(`${cleanCode}:${cleanDate}`, userName);
+      `, [`${cleanCode}:${cleanDate}`, userName]);
     } catch {
       // Non-blocking
     }
@@ -489,7 +472,7 @@ export async function restorePriceAction(prodCode: string, effDate: string) {
     revalidatePath('/products');
     return { success: true };
   } catch (err: any) {
-    return { error: err?.message || 'Failed to restore price record.' };
+    return { error: sanitizeDbError(err, 'Failed to restore price record.') };
   }
 }
 
@@ -499,9 +482,7 @@ export async function correctPriceAction(input: { prodCode: string; unitPrice: n
   const db = getSqliteDb();
   let effDate = input.effDate;
   if (!effDate) {
-    const latest = db
-      .prepare('SELECT effDate FROM PRICEHIST WHERE prodCode = ? ORDER BY effDate DESC LIMIT 1')
-      .get(input.prodCode.toUpperCase()) as any;
+    const latest = await db.get<{ effDate: string }>('SELECT effDate FROM PRICEHIST WHERE prodCode = ? ORDER BY effDate DESC LIMIT 1', [input.prodCode.toUpperCase()]);
     effDate = latest?.effDate;
   }
   if (!effDate) {
@@ -513,4 +494,3 @@ export async function correctPriceAction(input: { prodCode: string; unitPrice: n
     unitPrice: input.unitPrice,
   });
 }
-

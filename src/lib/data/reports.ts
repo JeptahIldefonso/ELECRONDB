@@ -1,7 +1,6 @@
-import { DatabaseSync } from 'node:sqlite';
-import { getHopeDb } from '@/lib/hope-db';
+import { getHopeDb, type HopeDatabase } from '@/lib/hope-db';
 
-function getDb(): DatabaseSync {
+function getDb(): HopeDatabase {
   return getHopeDb();
 }
 
@@ -18,6 +17,17 @@ const salaryFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 0,
 });
 
+function formatDateString(val: any): string {
+  if (!val) return '—';
+  if (val instanceof Date) {
+    return val.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+  }
+  const s = String(val).trim();
+  if (!s || s === 'null') return '—';
+  if (s.includes('T')) return s.split('T')[0];
+  return s;
+}
+
 // ========================================================================
 // 1. TOP CUSTOMERS BY SALES (Figure 28)
 // ========================================================================
@@ -29,7 +39,7 @@ export interface TopCustomerRow {
   totalSalesFormatted: string;
 }
 
-export function getTopCustomers(fromDate = '2010-01-01', toDate = '2026-12-31', topN = 10): TopCustomerRow[] {
+export async function getTopCustomers(fromDate = '2010-01-01', toDate = '2026-12-31', topN = 10): Promise<TopCustomerRow[]> {
   const db = getDb();
   const effectiveFrom = fromDate || '2000-01-01';
   const effectiveTo = toDate || '2099-12-31';
@@ -55,21 +65,35 @@ export function getTopCustomers(fromDate = '2010-01-01', toDate = '2026-12-31', 
       AND sd.is_deleted = 0
       AND s.salesDate BETWEEN ? AND ?
     GROUP BY c.custNo, c.custName
-    HAVING totalSales > 0
+    HAVING SUM(sd.quantity * (
+        SELECT ph.unitPrice 
+        FROM PRICEHIST ph 
+        WHERE ph.prodCode = sd.prodCode 
+          AND ph.effDate <= s.salesDate 
+          AND ph.is_deleted = 0
+        ORDER BY ph.effDate DESC 
+        LIMIT 1
+      )) > 0
     ORDER BY totalSales DESC
     LIMIT ?
   `;
 
   try {
-    const rows = db.prepare(query).all(effectiveFrom, effectiveTo, effectiveTopN) as any[];
-    return rows.map((r, idx) => ({
-      rank: idx + 1,
-      custNo: String(r.custNo),
-      custName: String(r.custName || ''),
-      totalSales: Number(r.totalSales || 0),
-      totalSalesFormatted: currencyFormatter.format(Number(r.totalSales || 0)),
-    }));
-  } catch {
+    const rows = await db.query(query, [effectiveFrom, effectiveTo, effectiveTopN]);
+    return rows.map((r: any, idx: number) => {
+      const custNo = r.custNo ?? r.custno ?? '';
+      const custName = r.custName ?? r.custname ?? '';
+      const totalSales = Number(r.totalSales ?? r.totalsales ?? 0);
+      return {
+        rank: idx + 1,
+        custNo: String(custNo),
+        custName: String(custName),
+        totalSales,
+        totalSalesFormatted: currencyFormatter.format(totalSales),
+      };
+    });
+  } catch (err: any) {
+    console.error('[reports] getTopCustomers error:', err?.message);
     return [];
   }
 }
@@ -86,7 +110,7 @@ export interface ProductMasterRow {
   currentPriceFormatted: string;
 }
 
-export function getProductMasterList(): ProductMasterRow[] {
+export async function getProductMasterList(): Promise<ProductMasterRow[]> {
   const db = getDb();
   const query = `
     SELECT 
@@ -97,7 +121,7 @@ export function getProductMasterList(): ProductMasterRow[] {
         SELECT ph.unitPrice 
         FROM PRICEHIST ph 
         WHERE ph.prodCode = p.prodCode 
-          AND ph.effDate <= date('now')
+          AND ph.effDate <= CURRENT_DATE
           AND ph.is_deleted = 0
         ORDER BY ph.effDate DESC 
         LIMIT 1
@@ -108,18 +132,23 @@ export function getProductMasterList(): ProductMasterRow[] {
   `;
 
   try {
-    const rows = db.prepare(query).all() as any[];
-    return rows.map((r) => {
-      const price = r.currentPrice !== null && r.currentPrice !== undefined ? Number(r.currentPrice) : null;
+    const rows = await db.query(query);
+    return rows.map((r: any) => {
+      const prodCode = r.prodCode ?? r.prodcode ?? '';
+      const description = r.description ?? '';
+      const unit = r.unit ?? 'pcs';
+      const rawPrice = r.currentPrice ?? r.currentprice;
+      const price = rawPrice !== null && rawPrice !== undefined && rawPrice !== '' ? Number(rawPrice) : null;
       return {
-        prodCode: String(r.prodCode),
-        description: String(r.description || ''),
-        unit: String(r.unit || 'pcs'),
+        prodCode: String(prodCode),
+        description: String(description),
+        unit: String(unit),
         currentPrice: price,
         currentPriceFormatted: price !== null ? currencyFormatter.format(price) : '—',
       };
     });
-  } catch {
+  } catch (err: any) {
+    console.error('[reports] getProductMasterList error:', err?.message);
     return [];
   }
 }
@@ -136,7 +165,7 @@ export interface TopProductRow {
   salesAmountFormatted: string;
 }
 
-export function getTopProducts(fromDate = '2010-01-01', toDate = '2026-12-31', topN = 10): TopProductRow[] {
+export async function getTopProducts(fromDate = '2010-01-01', toDate = '2026-12-31', topN = 10): Promise<TopProductRow[]> {
   const db = getDb();
   const effectiveFrom = fromDate || '2000-01-01';
   const effectiveTo = toDate || '2099-12-31';
@@ -163,22 +192,37 @@ export function getTopProducts(fromDate = '2010-01-01', toDate = '2026-12-31', t
       AND sd.is_deleted = 0
       AND s.salesDate BETWEEN ? AND ?
     GROUP BY sd.prodCode, p.description
-    HAVING salesAmount > 0
+    HAVING SUM(sd.quantity * (
+        SELECT ph.unitPrice 
+        FROM PRICEHIST ph 
+        WHERE ph.prodCode = sd.prodCode 
+          AND ph.effDate <= s.salesDate 
+          AND ph.is_deleted = 0
+        ORDER BY ph.effDate DESC 
+        LIMIT 1
+      )) > 0
     ORDER BY salesAmount DESC
     LIMIT ?
   `;
 
   try {
-    const rows = db.prepare(query).all(effectiveFrom, effectiveTo, effectiveTopN) as any[];
-    return rows.map((r, idx) => ({
-      rank: idx + 1,
-      prodCode: String(r.prodCode),
-      description: String(r.description || ''),
-      qtySold: Number(r.qtySold || 0),
-      salesAmount: Number(r.salesAmount || 0),
-      salesAmountFormatted: currencyFormatter.format(Number(r.salesAmount || 0)),
-    }));
-  } catch {
+    const rows = await db.query(query, [effectiveFrom, effectiveTo, effectiveTopN]);
+    return rows.map((r: any, idx: number) => {
+      const prodCode = r.prodCode ?? r.prodcode ?? '';
+      const description = r.description ?? '';
+      const qtySold = Number(r.qtySold ?? r.qtysold ?? 0);
+      const salesAmount = Number(r.salesAmount ?? r.salesamount ?? 0);
+      return {
+        rank: idx + 1,
+        prodCode: String(prodCode),
+        description: String(description),
+        qtySold,
+        salesAmount,
+        salesAmountFormatted: currencyFormatter.format(salesAmount),
+      };
+    });
+  } catch (err: any) {
+    console.error('[reports] getTopProducts error:', err?.message);
     return [];
   }
 }
@@ -196,27 +240,28 @@ export interface ActiveEmployeeRow {
   hireDate: string;
 }
 
-export function getActiveEmployees(): ActiveEmployeeRow[] {
+export async function getActiveEmployees(): Promise<ActiveEmployeeRow[]> {
   const db = getDb();
   const query = `
     SELECT empNo, lastName, firstName, gender, birthDate, hireDate
     FROM EMPLOYEE
-    WHERE (sepDate IS NULL OR sepDate = '' OR trim(sepDate) = '')
+    WHERE sepDate IS NULL
       AND is_deleted = 0
     ORDER BY empNo ASC
   `;
 
   try {
-    const rows = db.prepare(query).all() as any[];
-    return rows.map((r) => ({
-      empNo: String(r.empNo),
-      lastName: String(r.lastName || ''),
-      firstName: String(r.firstName || ''),
-      gender: String(r.gender || '—'),
-      birthDate: String(r.birthDate || '—'),
-      hireDate: String(r.hireDate || '—'),
+    const rows = await db.query(query);
+    return rows.map((r: any) => ({
+      empNo: String(r.empNo ?? r.empno ?? ''),
+      lastName: String(r.lastName ?? r.lastname ?? ''),
+      firstName: String(r.firstName ?? r.firstname ?? ''),
+      gender: String(r.gender ?? '—'),
+      birthDate: formatDateString(r.birthDate ?? r.birthdate),
+      hireDate: formatDateString(r.hireDate ?? r.hiredate),
     }));
-  } catch {
+  } catch (err: any) {
+    console.error('[reports] getActiveEmployees error:', err?.message);
     return [];
   }
 }
@@ -235,7 +280,7 @@ export interface AllEmployeeRow {
   status: 'Active' | 'Inactive';
 }
 
-export function getAllEmployeesReport(): AllEmployeeRow[] {
+export async function getAllEmployeesReport(): Promise<AllEmployeeRow[]> {
   const db = getDb();
   const query = `
     SELECT empNo, lastName, firstName, gender, birthDate, hireDate, sepDate, is_deleted
@@ -244,22 +289,25 @@ export function getAllEmployeesReport(): AllEmployeeRow[] {
   `;
 
   try {
-    const rows = db.prepare(query).all() as any[];
-    return rows.map((r) => {
-      const isSep = Boolean(r.sepDate && String(r.sepDate).trim() !== '');
-      const isInactive = isSep || Boolean(r.is_deleted);
+    const rows = await db.query(query);
+    return rows.map((r: any) => {
+      const sepDateRaw = r.sepDate ?? r.sepdate;
+      const isSep = Boolean(sepDateRaw && String(sepDateRaw).trim() !== '' && String(sepDateRaw) !== 'null');
+      const isDeleted = Boolean(r.is_deleted === 1 || r.is_deleted === true || r.is_deleted === '1');
+      const isInactive = isSep || isDeleted;
       return {
-        empNo: String(r.empNo),
-        lastName: String(r.lastName || ''),
-        firstName: String(r.firstName || ''),
-        gender: String(r.gender || '—'),
-        birthDate: String(r.birthDate || '—'),
-        hireDate: String(r.hireDate || '—'),
-        sepDate: isSep ? String(r.sepDate) : null,
+        empNo: String(r.empNo ?? r.empno ?? ''),
+        lastName: String(r.lastName ?? r.lastname ?? ''),
+        firstName: String(r.firstName ?? r.firstname ?? ''),
+        gender: String(r.gender ?? '—'),
+        birthDate: formatDateString(r.birthDate ?? r.birthdate),
+        hireDate: formatDateString(r.hireDate ?? r.hiredate),
+        sepDate: isSep ? formatDateString(sepDateRaw) : null,
         status: isInactive ? 'Inactive' : 'Active',
       };
     });
-  } catch {
+  } catch (err: any) {
+    console.error('[reports] getAllEmployeesReport error:', err?.message);
     return [];
   }
 }
@@ -275,9 +323,11 @@ export interface EmployeeJobHistoryRow {
   salaryFormatted: string;
 }
 
-export function getEmployeeJobHistoryReport(empNo: string | number): EmployeeJobHistoryRow[] {
+export async function getEmployeeJobHistoryReport(empNo: string | number): Promise<EmployeeJobHistoryRow[]> {
   const db = getDb();
-  const cleanEmpNo = String(empNo).trim();
+  const cleanEmpNo = String(empNo || '').trim();
+  if (!cleanEmpNo || cleanEmpNo === 'undefined') return [];
+
   const query = `
     SELECT 
       jh.effDate,
@@ -292,15 +342,19 @@ export function getEmployeeJobHistoryReport(empNo: string | number): EmployeeJob
   `;
 
   try {
-    const rows = db.prepare(query).all(cleanEmpNo) as any[];
-    return rows.map((r) => ({
-      effDate: String(r.effDate || ''),
-      job: String(r.job || ''),
-      department: String(r.department || ''),
-      salary: Number(r.salary || 0),
-      salaryFormatted: salaryFormatter.format(Number(r.salary || 0)),
-    }));
-  } catch {
+    const rows = await db.query(query, [cleanEmpNo]);
+    return rows.map((r: any) => {
+      const salary = Number(r.salary ?? 0);
+      return {
+        effDate: formatDateString(r.effDate ?? r.effdate),
+        job: String(r.job ?? ''),
+        department: String(r.department ?? ''),
+        salary,
+        salaryFormatted: salaryFormatter.format(salary),
+      };
+    });
+  } catch (err: any) {
+    console.error('[reports] getEmployeeJobHistoryReport error:', err?.message);
     return [];
   }
 }
@@ -318,7 +372,7 @@ export interface TopSaleRow {
   totalFormatted: string;
 }
 
-export function getTopSales(fromDate = '2010-01-01', toDate = '2026-12-31', topN = 10): TopSaleRow[] {
+export async function getTopSales(fromDate = '2010-01-01', toDate = '2026-12-31', topN = 10): Promise<TopSaleRow[]> {
   const db = getDb();
   const effectiveFrom = fromDate || '2000-01-01';
   const effectiveTo = toDate || '2099-12-31';
@@ -347,41 +401,58 @@ export function getTopSales(fromDate = '2010-01-01', toDate = '2026-12-31', topN
       AND sd.is_deleted = 0
       AND s.salesDate BETWEEN ? AND ?
     GROUP BY s.transNo, s.salesDate, c.custName, e.firstName, e.lastName
-    HAVING total > 0
+    HAVING SUM(sd.quantity * (
+        SELECT ph.unitPrice 
+        FROM PRICEHIST ph 
+        WHERE ph.prodCode = sd.prodCode 
+          AND ph.effDate <= s.salesDate 
+          AND ph.is_deleted = 0
+        ORDER BY ph.effDate DESC 
+        LIMIT 1
+      )) > 0
     ORDER BY total DESC
     LIMIT ?
   `;
 
   try {
-    const rows = db.prepare(query).all(effectiveFrom, effectiveTo, effectiveTopN) as any[];
-    return rows.map((r, idx) => ({
-      rank: idx + 1,
-      transNo: String(r.transNo),
-      date: String(r.date || ''),
-      customer: String(r.customer || ''),
-      employee: String(r.employee || ''),
-      total: Number(r.total || 0),
-      totalFormatted: currencyFormatter.format(Number(r.total || 0)),
-    }));
-  } catch {
+    const rows = await db.query(query, [effectiveFrom, effectiveTo, effectiveTopN]);
+    return rows.map((r: any, idx: number) => {
+      const transNo = r.transNo ?? r.transno ?? '';
+      const date = formatDateString(r.date ?? r.salesDate ?? r.salesdate);
+      const customer = r.customer ?? r.custName ?? r.custname ?? '';
+      const employee = r.employee ?? '';
+      const total = Number(r.total ?? 0);
+      return {
+        rank: idx + 1,
+        transNo: String(transNo),
+        date,
+        customer: String(customer),
+        employee: String(employee),
+        total,
+        totalFormatted: currencyFormatter.format(total),
+      };
+    });
+  } catch (err: any) {
+    console.error('[reports] getTopSales error:', err?.message);
     return [];
   }
 }
 
-export function getEmployeesListForDropdown(): Array<{ empNo: string; fullName: string }> {
+export async function getEmployeesListForDropdown(): Promise<Array<{ empNo: string; fullName: string }>> {
   const db = getDb();
   try {
-    const rows = db.prepare(`
+    const rows = await db.query(`
       SELECT empNo, empNo || ' — ' || firstName || ' ' || lastName as fullName 
       FROM EMPLOYEE 
       WHERE is_deleted = 0
       ORDER BY empNo ASC
-    `).all() as any[];
-    return rows.map((r) => ({
-      empNo: String(r.empNo),
-      fullName: String(r.fullName),
+    `);
+    return rows.map((r: any) => ({
+      empNo: String(r.empNo ?? r.empno ?? ''),
+      fullName: String(r.fullName ?? r.fullname ?? `${r.empNo ?? r.empno} — ${r.firstName ?? r.firstname} ${r.lastName ?? r.lastname}`),
     }));
-  } catch {
+  } catch (err: any) {
+    console.error('[reports] getEmployeesListForDropdown error:', err?.message);
     return [];
   }
 }
