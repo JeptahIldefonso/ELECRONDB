@@ -6,12 +6,12 @@ test.describe('Authentication & Route Protection Smoke Tests', () => {
 
     // Page title or main branding
     await expect(page).toHaveTitle(/ElectronDB|Hope/i);
-    await expect(page.locator('text=Welcome back').or(page.locator('text=Sign In'))).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Welcome back/i })).toBeVisible();
 
     // Sign in form inputs
     const emailOrUserInput = page.locator('input[type="text"], input[name="emailOrUsername"], input[type="email"]').first();
     await expect(emailOrUserInput).toBeVisible();
-    await expect(page.locator('input[type="password"]')).toBeVisible();
+    await expect(page.locator('input[type="password"]').first()).toBeVisible();
   });
 
   test('Unauthenticated visit to a protected route redirects to /login', async ({ page }) => {
@@ -27,10 +27,10 @@ test.describe('Authentication & Route Protection Smoke Tests', () => {
     await page.goto('/login');
 
     // Click Register tab if available
-    const registerTab = page.locator('button:has-text("Register"), a:has-text("Register")').first();
+    const registerTab = page.getByRole('tab', { name: /Register/i }).or(page.locator('button:has-text("Register")')).first();
     if (await registerTab.isVisible()) {
       await registerTab.click();
-      await expect(page.locator('text=Create your account').or(page.locator('input[type="password"]'))).toBeVisible();
+      await expect(page.getByRole('heading', { name: /Create your account/i })).toBeVisible();
     }
   });
 });

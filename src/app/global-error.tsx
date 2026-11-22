@@ -1,7 +1,6 @@
 'use client';
 
 import React from 'react';
-import Link from 'next/link';
 
 export default function GlobalError({
   error,
@@ -74,7 +73,8 @@ export default function GlobalError({
             >
               Retry
             </button>
-            <Link
+            {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+            <a
               href="/"
               style={{
                 backgroundColor: '#f1f5f9',
@@ -88,7 +88,7 @@ export default function GlobalError({
               }}
             >
               Go to Home
-            </Link>
+            </a>
           </div>
         </div>
       </body>
