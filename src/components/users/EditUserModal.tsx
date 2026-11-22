@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useState, useTransition, useEffect } from 'react';
-import { X, Loader2, UserCheck, Shield } from 'lucide-react';
+import React, { useState, useTransition, useEffect, useMemo } from 'react';
+import { X, Loader2, UserCheck, Shield, User } from 'lucide-react';
 import type { UserAccount, UserRole } from '@/lib/types';
-import { updateUserProfileAction } from '@/app/actions/auth';
+import { updateUserProfileAction, getAssignableEmployeesAction } from '@/app/actions/auth';
 
 interface EditUserModalProps {
   user: UserAccount | null;
@@ -25,21 +25,55 @@ export function EditUserModal({
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<UserRole>('User');
   const [newPassword, setNewPassword] = useState('');
+  const [empno, setEmpno] = useState('');
+  const [employees, setEmployees] = useState<{ empno: string; label: string }[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [loadingEmployees, setLoadingEmployees] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const isSuperadmin = currentUserRole === 'Superadmin';
 
   useEffect(() => {
-    if (user) {
+    if (user && isOpen) {
       setFirstName(user.firstName || '');
       setLastName(user.lastName || '');
       setEmail(user.email || '');
       setRole(user.role);
       setNewPassword('');
+      setEmpno(user.empno || '');
       setError(null);
+      setSearchQuery('');
+
+      setLoadingEmployees(true);
+      getAssignableEmployeesAction(user.userId)
+        .then((res) => {
+          if (res.success && res.employees) {
+            let list = res.employees;
+            // If the user already has a linked employee, ensure it's in the list even if soft-deleted
+            if (user.empno && !list.some((e) => e.empno === user.empno)) {
+              list = [
+                {
+                  empno: user.empno,
+                  label: `${user.empno}: ${user.employeeName || user.empno}`,
+                },
+                ...list,
+              ];
+            }
+            setEmployees(list);
+          }
+        })
+        .finally(() => setLoadingEmployees(false));
     }
-  }, [user]);
+  }, [user, isOpen]);
+
+  const filteredEmployees = useMemo(() => {
+    if (!searchQuery.trim()) return employees;
+    const q = searchQuery.toLowerCase().trim();
+    return employees.filter(
+      (e) => e.empno.toLowerCase().includes(q) || e.label.toLowerCase().includes(q)
+    );
+  }, [employees, searchQuery]);
 
   if (!isOpen || !user) return null;
 
@@ -65,6 +99,7 @@ export function EditUserModal({
         email: email.trim(),
         role: role,
         newPassword: newPassword.trim() ? newPassword.trim() : undefined,
+        empno: empno ? empno : null,
       });
 
       if (res.error) {
@@ -168,6 +203,44 @@ export function EditUserModal({
                 Admins may only assign User or Admin roles. Superadmin promotion is restricted.
               </p>
             )}
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-slate-700 dark:text-slate-300 font-medium">
+                Linked Employee Profile
+              </label>
+              {loadingEmployees && (
+                <span className="text-[10.5px] text-slate-400 flex items-center gap-1 font-mono">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Loading roster...
+                </span>
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <input
+                type="text"
+                placeholder="Search active employees by name or empno..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-2.5 py-1 text-[11px] text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-[#001A2B] focus:ring-1 focus:ring-[#001A2B]/40 focus:outline-none"
+              />
+              <select
+                value={empno}
+                onChange={(e) => setEmpno(e.target.value)}
+                className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs text-slate-900 dark:text-slate-100 focus:border-[#001A2B] focus:ring-1 focus:ring-[#001A2B]/40 focus:outline-none transition-all cursor-pointer"
+              >
+                <option value="">None (Unlinked)</option>
+                {filteredEmployees.map((emp) => (
+                  <option key={emp.empno} value={emp.empno}>
+                    {emp.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-[10.5px] text-slate-500 mt-1">
+              Associates this account with an EMPLOYEE record. Each employee can only be linked to one account.
+            </p>
           </div>
 
           <div>

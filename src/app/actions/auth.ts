@@ -22,6 +22,7 @@ import {
   updateUserRights,
   adminCreateUser,
   updateUserProfile,
+  getAssignableEmployees,
 } from '@/lib/auth-db';
 
 /**
@@ -525,6 +526,23 @@ export async function createUserAction(data: {
   }
 }
 
+export async function getAssignableEmployeesAction(forUserId?: string): Promise<{
+  success: boolean;
+  employees?: { empno: string; label: string }[];
+  error?: string;
+}> {
+  try {
+    const currentUser = await getCurrentUser();
+    if (!currentUser || (currentUser.role !== 'Superadmin' && currentUser.role !== 'Admin' && currentUser.role !== 'admin')) {
+      return { success: false, error: 'Access denied: Only administrators can view employee links.' };
+    }
+    const employees = await getAssignableEmployees(forUserId);
+    return { success: true, employees };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to load assignable employees.' };
+  }
+}
+
 export async function updateUserProfileAction(data: {
   userId: string;
   firstName: string;
@@ -532,6 +550,7 @@ export async function updateUserProfileAction(data: {
   email: string;
   role?: UserRole;
   newPassword?: string;
+  empno?: string | null;
 }): Promise<{ success: boolean; error?: string }> {
   try {
     const currentUser = await getCurrentUser();
@@ -558,7 +577,8 @@ export async function updateUserProfileAction(data: {
       data.email,
       data.role,
       passwordHash,
-      currentUser.fullName || 'Admin'
+      currentUser.fullName || 'Admin',
+      data.empno
     );
 
     if (res.success) {
