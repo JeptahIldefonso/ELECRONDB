@@ -7,17 +7,22 @@ const AFTER_VERIFY = '/';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const token_hash = searchParams.get('token_hash');
+  const token = searchParams.get('token_hash') || searchParams.get('token');
   const type = searchParams.get('type') as EmailOtpType | null;
   const code = searchParams.get('code');
+  const email = searchParams.get('email');
 
   const supabase = await createClient();
 
-  if (token_hash) {
+  if (token) {
     const otpType = (type || 'email') as EmailOtpType;
-    let { error } = await supabase.auth.verifyOtp({ type: otpType, token_hash });
-    if (error && otpType !== 'signup') {
-      const retry = await supabase.auth.verifyOtp({ type: 'signup', token_hash });
+    let { error } = await supabase.auth.verifyOtp({ type: otpType, token_hash: token });
+    if (error && email) {
+      const retryEmail = await supabase.auth.verifyOtp({ type: otpType, token, email });
+      if (!retryEmail.error) error = null;
+    }
+    if (error && otpType !== 'signup' && otpType !== 'recovery') {
+      const retry = await supabase.auth.verifyOtp({ type: 'signup', token_hash: token });
       if (!retry.error) error = null;
     }
     if (!error) {

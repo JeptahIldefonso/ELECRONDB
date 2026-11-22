@@ -591,7 +591,13 @@ export async function requestPasswordResetAction(email: string): Promise<{
       return { success: false, error: 'Enter your email address.' };
     }
 
-    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
+    const headerList = await headers();
+    const host = headerList.get('x-forwarded-host') || headerList.get('host');
+    const proto = headerList.get('x-forwarded-proto') || 'https';
+    const siteUrl = host
+      ? `${proto}://${host}`
+      : (process.env.NEXT_PUBLIC_SITE_URL ?? 'https://electrondb.vercel.app');
+
     const supabase = await createClient();
 
     const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
@@ -635,7 +641,13 @@ export async function adminSendPasswordResetEmailAction(email: string): Promise<
       return { success: false, error: 'Target user email is required.' };
     }
 
-    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
+    const headerList = await headers();
+    const host = headerList.get('x-forwarded-host') || headerList.get('host');
+    const proto = headerList.get('x-forwarded-proto') || 'https';
+    const siteUrl = host
+      ? `${proto}://${host}`
+      : (process.env.NEXT_PUBLIC_SITE_URL ?? 'https://electrondb.vercel.app');
+
     const supabase = await createClient();
 
     const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
