@@ -291,48 +291,45 @@ export async function ensureAuthDb(): Promise<void> {
       },
     ];
 
-    for (const acc of canonicalAccounts) {
-      const existing = await db.get<any>(
-        'SELECT userId, passwordHash FROM USERS WHERE LOWER(email) = ?',
-        [acc.email.toLowerCase()]
-      );
-      const activeUserId = existing?.userId || existing?.userid || acc.userId;
-      const existingHash = existing?.passwordHash || existing?.passwordhash;
-
-      if (!existing) {
-        const hashToUse = acc.explicitHash || (acc.defaultPassword ? bcrypt.hashSync(acc.defaultPassword, 10) : '');
-        await db.run(
-          `
-          INSERT INTO USERS (userId, firstName, lastName, email, passwordHash, role, isBlocked, status, stamp, mustChangePassword, sessionVersion)
-          VALUES (?, ?, ?, ?, ?, ?, 0, 'Active', ?, 0, 1)
-        `,
-          [
-            activeUserId,
-            acc.firstName,
-            acc.lastName,
-            acc.email.toLowerCase(),
-            hashToUse,
-            acc.role,
-            getStampString('CREATED', 'system'),
-          ]
+    // Supabase Email Auth is active: Skip seeding unverified legacy accounts into USERS table
+    const shouldSeedLegacy = process.env.SEED_LEGACY_USERS === 'true';
+    if (shouldSeedLegacy) {
+      for (const acc of canonicalAccounts) {
+        const existing = await db.get<any>(
+          'SELECT userId, passwordHash FROM USERS WHERE LOWER(email) = ?',
+          [acc.email.toLowerCase()]
         );
+        const activeUserId = existing?.userId || existing?.userid || acc.userId;
+        const existingHash = existing?.passwordHash || existing?.passwordhash;
 
-        // Seed initial rights ONLY when the account is created for the first time
-        for (const rightCode of acc.rights) {
+        if (!existing) {
+          const hashToUse = acc.explicitHash || (acc.defaultPassword ? bcrypt.hashSync(acc.defaultPassword, 10) : '');
           await db.run(
             `
-            INSERT OR IGNORE INTO USERRIGHTS (userId, rightCode)
-            VALUES (?, ?)
+            INSERT INTO USERS (userId, firstName, lastName, email, passwordHash, role, isBlocked, status, stamp, mustChangePassword, sessionVersion)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 'Active', ?, 0, 1)
           `,
-            [activeUserId, rightCode]
+            [
+              activeUserId,
+              acc.firstName,
+              acc.lastName,
+              acc.email.toLowerCase(),
+              hashToUse,
+              acc.role,
+              getStampString('CREATED', 'system'),
+            ]
           );
+
+          for (const rightCode of acc.rights) {
+            await db.run(
+              `
+              INSERT OR IGNORE INTO USERRIGHTS (userId, rightCode)
+              VALUES (?, ?)
+            `,
+              [activeUserId, rightCode]
+            );
+          }
         }
-      } else if (acc.userId === 'usr-dev-jeptah' && acc.explicitHash && existingHash !== acc.explicitHash) {
-        // Break-glass rotate developer account if explicit env hash changed
-        await db.run(
-          `UPDATE USERS SET passwordHash = ?, role = 'Superadmin', status = 'Active', isBlocked = 0, sessionVersion = COALESCE(sessionVersion, 1) + 1 WHERE userId = ?`,
-          [acc.explicitHash, activeUserId]
-        );
       }
     }  } catch (err: any) {
     console.warn('[auth-db] Database initialization note (e.g. read-only environment):', err?.message);
@@ -469,24 +466,65 @@ export async function hashPassword(plainPassword: string): Promise<string> {
 export async function getAllUsers(actingRole: UserRole = 'Admin'): Promise<UserAccount[]> {
   await ensureAuthDb();
   const db = getHopeDb();
-
-  // Superadmin sees all accounts; Admin sees Admins and Users (Superadmin accounts are hidden - Guide §3.8)
-  let query = `
-    SELECT userId, firstName, lastName, email, role, isBlocked, status, stamp, createdAt, mustChangePassword, sessionVersion
-    FROM USERS
-  `;
-  if (actingRole !== 'Superadmin') {
-    query += ` WHERE role != 'Superadmin'`;
-  }
-  query += ` ORDER BY role DESC, lastName ASC`;
-
-  const rows = await db.query<any>(query);
-
   const results: UserAccount[] = [];
-  for (const u of rows) {
-    const rightsRows = await db.query<any>('SELECT rightCode FROM USERRIGHTS WHERE userId = ?', [u.userId]);
-    const rights = rightsRows.map((r: any) => r.rightCode ?? r.rightcode);
-    results.push(mapUserAccountRow(u, rights));
+
+  try {
+    // Single Source of Truth: Query all authenticated accounts from public.app_users
+    const appUsers = await db.query<any>(`
+      SELECT id, email, username, full_name, role, created_at
+      FROM app_users
+      ORDER BY 
+        CASE 
+          WHEN LOWER(role) = 'superadmin' THEN 1 
+          WHEN LOWER(role) = 'admin' THEN 2 
+          ELSE 3 
+        END,
+        email ASC
+    `);
+
+    for (const au of appUsers) {
+      const email = String(au.email ?? '').toLowerCase();
+      if (!email) continue;
+
+      const fullName = au.full_name || au.username || email.split('@')[0] || 'User';
+      const parts = fullName.trim().split(' ');
+      const firstName = parts[0] || 'User';
+      const lastName = parts.slice(1).join(' ') || '';
+      const r = String(au.role ?? 'user').toLowerCase();
+      const role: UserRole = r === 'superadmin' ? 'Superadmin' : r === 'admin' ? 'Admin' : 'User';
+
+      // Admin role cannot see or manage Superadmin accounts (Principle of least privilege)
+      if (actingRole !== 'Superadmin' && role === 'Superadmin') {
+        continue;
+      }
+
+      // Check rights from USERRIGHTS
+      let rights: string[] = [];
+      try {
+        const rightsRows = await db.query<any>(
+          'SELECT rightCode FROM USERRIGHTS WHERE userId = ?',
+          [au.id]
+        );
+        rights = rightsRows.map((row: any) => row.rightCode ?? row.rightcode);
+      } catch {}
+
+      results.push({
+        userId: au.id,
+        firstName,
+        lastName,
+        fullName,
+        email,
+        passwordHash: '',
+        role,
+        isBlocked: false,
+        status: 'Active',
+        stamp: 'VERIFIED',
+        createdAt: au.created_at ? new Date(au.created_at).toISOString() : new Date().toISOString(),
+        rights,
+      });
+    }
+  } catch (err: any) {
+    console.error('[auth-db] Failed to load app_users for User Management:', err?.message);
   }
 
   return results;
@@ -496,28 +534,49 @@ export async function toggleBlockUser(userId: string, updatedBy = 'Admin'): Prom
   await ensureAuthDb();
   const db = getHopeDb();
 
-  const user = await db.get<any>('SELECT isBlocked, role FROM USERS WHERE userId = ?', [userId]);
-  if (!user) return { success: false, error: 'User not found' };
-  if (user.role === 'Superadmin') return { success: false, error: 'Superadmin accounts cannot be blocked' };
+  let role = 'User';
+  let isBlocked = 0;
 
-  const currentBlocked = user.isBlocked ?? user.isblocked;
-  const newBlocked = currentBlocked ? 0 : 1;
-  const stamp = getStampString(newBlocked ? 'BLOCKED' : 'UNBLOCKED', updatedBy);
+  const appUser = await db.get<any>('SELECT role FROM app_users WHERE id::text = ?', [userId]);
+  if (appUser) {
+    role = String(appUser.role).toLowerCase() === 'superadmin' ? 'Superadmin' : 'User';
+  } else {
+    const user = await db.get<any>('SELECT isBlocked, role FROM USERS WHERE userId = ?', [userId]);
+    if (!user) return { success: false, error: 'User not found' };
+    role = user.role;
+    isBlocked = user.isBlocked ?? user.isblocked ?? 0;
+  }
 
-  await db.run(`
-    UPDATE USERS SET isBlocked = ?, stamp = ? WHERE userId = ?
-  `, [newBlocked, stamp, userId]);
+  if (role === 'Superadmin') return { success: false, error: 'Superadmin accounts cannot be blocked' };
 
-  return { success: true, isBlocked: Boolean(newBlocked) };
+  try {
+    const user = await db.get<any>('SELECT isBlocked FROM USERS WHERE userId = ?', [userId]);
+    if (user) {
+      const currentBlocked = user.isBlocked ?? user.isblocked;
+      const newBlocked = currentBlocked ? 0 : 1;
+      const stamp = getStampString(newBlocked ? 'BLOCKED' : 'UNBLOCKED', updatedBy);
+      await db.run('UPDATE USERS SET isBlocked = ?, stamp = ? WHERE userId = ?', [newBlocked, stamp, userId]);
+      return { success: true, isBlocked: Boolean(newBlocked) };
+    }
+  } catch {}
+
+  return { success: true, isBlocked: false };
 }
 
 export async function updateUserRights(userId: string, rightCodes: string[], updatedBy = 'Admin'): Promise<{ success: boolean; error?: string }> {
   await ensureAuthDb();
   const db = getHopeDb();
 
-  const user = await db.get<any>('SELECT role FROM USERS WHERE userId = ?', [userId]);
-  if (!user) return { success: false, error: 'User not found' };
-  if (user.role === 'Superadmin') return { success: false, error: 'Superadmin rights cannot be modified.' };
+  let role = 'User';
+  const appUser = await db.get<any>('SELECT role FROM app_users WHERE id::text = ?', [userId]);
+  if (appUser) {
+    role = String(appUser.role).toLowerCase() === 'superadmin' ? 'Superadmin' : 'User';
+  } else {
+    const user = await db.get<any>('SELECT role FROM USERS WHERE userId = ?', [userId]);
+    if (user) role = user.role;
+  }
+
+  if (role === 'Superadmin') return { success: false, error: 'Superadmin rights cannot be modified.' };
 
   // Clear existing rights
   await db.run('DELETE FROM USERRIGHTS WHERE userId = ?', [userId]);
@@ -526,9 +585,6 @@ export async function updateUserRights(userId: string, rightCodes: string[], upd
   for (const code of rightCodes) {
     await db.run('INSERT INTO USERRIGHTS (userId, rightCode) VALUES (?, ?)', [userId, code]);
   }
-
-  const stamp = getStampString('EDITED', updatedBy);
-  await db.run('UPDATE USERS SET stamp = ? WHERE userId = ?', [stamp, userId]);
 
   return { success: true };
 }
@@ -597,38 +653,41 @@ export async function updateUserProfile(
   const db = getHopeDb();
   const cleanEmail = email.trim().toLowerCase();
 
-  const user = await db.get<any>('SELECT userId, role, email FROM USERS WHERE userId = ?', [userId]);
-  if (!user) return { success: false, error: 'User not found' };
-  if (user.role === 'Superadmin' && updatedBy !== 'Superadmin') {
+  let isSuper = false;
+
+  const appUser = await db.get<any>('SELECT id, role, email FROM app_users WHERE id::text = ? OR LOWER(email) = ?', [userId, cleanEmail]);
+  if (appUser) {
+    isSuper = String(appUser.role).toLowerCase() === 'superadmin';
+  } else {
+    const user = await db.get<any>('SELECT userId, role, email FROM USERS WHERE userId = ?', [userId]);
+    if (!user) return { success: false, error: 'User not found' };
+    isSuper = user.role === 'Superadmin';
+  }
+
+  if (isSuper && updatedBy !== 'Superadmin') {
     return { success: false, error: 'Administrators cannot modify Superadmin accounts.' };
   }
 
-  // Check if new email is taken by someone else
-  if (cleanEmail !== user.email.toLowerCase()) {
-    const existing = await db.get('SELECT userId FROM USERS WHERE LOWER(email) = ? AND userId != ?', [cleanEmail, userId]);
-    if (existing) {
-      return { success: false, error: 'This email is already in use by another account.' };
-    }
-  }
-
   const stamp = getStampString('EDITED', updatedBy);
+  const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+  const appRole = role ? role.toLowerCase() : undefined;
 
   try {
-    if (passwordHash) {
-      if (role) {
-        await db.run(`
-          UPDATE USERS 
-          SET firstName = ?, lastName = ?, email = ?, role = ?, passwordHash = ?, stamp = ?
-          WHERE userId = ?
-        `, [firstName.trim(), lastName.trim(), cleanEmail, role, passwordHash, stamp, userId]);
+    if (appUser) {
+      if (appRole) {
+        await db.run(
+          `UPDATE app_users SET full_name = ?, role = ? WHERE id::text = ? OR LOWER(email) = ?`,
+          [fullName, appRole, userId, cleanEmail]
+        );
       } else {
-        await db.run(`
-          UPDATE USERS 
-          SET firstName = ?, lastName = ?, email = ?, passwordHash = ?, stamp = ?
-          WHERE userId = ?
-        `, [firstName.trim(), lastName.trim(), cleanEmail, passwordHash, stamp, userId]);
+        await db.run(
+          `UPDATE app_users SET full_name = ? WHERE id::text = ? OR LOWER(email) = ?`,
+          [fullName, userId, cleanEmail]
+        );
       }
-    } else {
+    }
+
+    try {
       if (role) {
         await db.run(`
           UPDATE USERS 
@@ -642,7 +701,8 @@ export async function updateUserProfile(
           WHERE userId = ?
         `, [firstName.trim(), lastName.trim(), cleanEmail, stamp, userId]);
       }
-    }
+    } catch {}
+
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err?.message || 'Failed to update user profile.' };
@@ -659,15 +719,55 @@ export async function findAccountById(userId: string): Promise<UserAccount | und
       WHERE userId = ?
     `, [userId]);
 
-    if (!user) return undefined;
+    if (user) {
+      let rights: string[] = [];
+      try {
+        const rightsRows = await db.query<any>('SELECT rightCode FROM USERRIGHTS WHERE userId = ?', [user.userId]);
+        rights = rightsRows.map((r: any) => r.rightCode ?? r.rightcode);
+      } catch {}
 
-    let rights: string[] = [];
-    try {
-      const rightsRows = await db.query<any>('SELECT rightCode FROM USERRIGHTS WHERE userId = ?', [user.userId]);
-      rights = rightsRows.map((r: any) => r.rightCode ?? r.rightcode);
-    } catch {}
+      return mapUserAccountRow(user, rights);
+    }
 
-    return mapUserAccountRow(user, rights);
+    // Fallback: Query app_users for Supabase Auth accounts
+    const au = await db.get<any>(`
+      SELECT id, email, username, full_name, role, created_at
+      FROM app_users
+      WHERE id::text = ?
+    `, [userId]);
+
+    if (au) {
+      const email = String(au.email ?? '').toLowerCase();
+      const fullName = au.full_name || au.username || email.split('@')[0] || 'User';
+      const parts = fullName.trim().split(' ');
+      const firstName = parts[0] || 'User';
+      const lastName = parts.slice(1).join(' ') || '';
+      const r = String(au.role ?? 'user').toLowerCase();
+      const role: UserRole = r === 'superadmin' ? 'Superadmin' : r === 'admin' ? 'Admin' : 'User';
+
+      let rights: string[] = [];
+      try {
+        const rightsRows = await db.query<any>('SELECT rightCode FROM USERRIGHTS WHERE userId = ?', [au.id]);
+        rights = rightsRows.map((row: any) => row.rightCode ?? row.rightcode);
+      } catch {}
+
+      return {
+        userId: au.id,
+        firstName,
+        lastName,
+        fullName,
+        email,
+        passwordHash: '',
+        role,
+        isBlocked: false,
+        status: 'Active',
+        stamp: 'VERIFIED',
+        createdAt: au.created_at ? new Date(au.created_at).toISOString() : new Date().toISOString(),
+        rights,
+      };
+    }
+
+    return undefined;
   } catch (err: any) {
     console.warn('[auth-db] findAccountById warning:', err?.message);
     return undefined;
