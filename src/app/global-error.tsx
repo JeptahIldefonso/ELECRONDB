@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import Link from 'next/link';
 
 export default function GlobalError({
   error,
@@ -73,7 +74,7 @@ export default function GlobalError({
             >
               Retry
             </button>
-            <a
+            <Link
               href="/"
               style={{
                 backgroundColor: '#f1f5f9',
@@ -87,7 +88,7 @@ export default function GlobalError({
               }}
             >
               Go to Home
-            </a>
+            </Link>
           </div>
         </div>
       </body>
