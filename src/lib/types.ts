@@ -31,6 +31,8 @@ export interface UserAccount {
   rights?: string[];
   mustChangePassword?: boolean;
   sessionVersion?: number;
+  empno?: string | null;
+  employeeName?: string | null;
 }
 
 export interface RightItem {

@@ -41,6 +41,7 @@ import type { UserRole, UserAccount } from '@/lib/types';
 import { CANONICAL_RIGHTS } from '@/lib/types';
 import { getHopeDb, type HopeDatabase } from '@/lib/hope-db';
 import { calculateRightsDiff, insertAuditLog } from '@/lib/audit';
+import { validateEmpnoLink } from '@/lib/empno-validation';
 
 let tablesInitialized = false;
 
@@ -472,15 +473,18 @@ export async function getAllUsers(actingRole: UserRole = 'Admin'): Promise<UserA
   try {
     // Single Source of Truth: Query all authenticated accounts from public.app_users
     const appUsers = await db.query<any>(`
-      SELECT id, email, username, full_name, role, created_at
-      FROM app_users
+      SELECT 
+        au.id, au.email, au.username, au.full_name, au.role, au.empno, au.created_at,
+        e.lastname as emp_lastname, e.firstname as emp_firstname, e.is_deleted as emp_is_deleted
+      FROM app_users au
+      LEFT JOIN employee e ON e.empno = au.empno
       ORDER BY 
         CASE 
-          WHEN LOWER(role) = 'superadmin' THEN 1 
-          WHEN LOWER(role) = 'admin' THEN 2 
+          WHEN LOWER(au.role) = 'superadmin' THEN 1 
+          WHEN LOWER(au.role) = 'admin' THEN 2 
           ELSE 3 
         END,
-        email ASC
+        au.email ASC
     `);
 
     for (const au of appUsers) {
@@ -509,6 +513,16 @@ export async function getAllUsers(actingRole: UserRole = 'Admin'): Promise<UserA
         rights = rightsRows.map((row: any) => row.rightCode ?? row.rightcode);
       } catch {}
 
+      let employeeName: string | null = null;
+      if (au.empno) {
+        if (au.emp_lastname || au.emp_firstname) {
+          const rawName = `${au.emp_lastname || ''}, ${au.emp_firstname || ''}`.trim().replace(/^,\s*|,\s*$/g, '');
+          employeeName = au.emp_is_deleted ? `${rawName} (removed)` : rawName;
+        } else {
+          employeeName = au.empno;
+        }
+      }
+
       results.push({
         userId: au.id,
         firstName,
@@ -522,6 +536,8 @@ export async function getAllUsers(actingRole: UserRole = 'Admin'): Promise<UserA
         stamp: 'VERIFIED',
         createdAt: au.created_at ? new Date(au.created_at).toISOString() : new Date().toISOString(),
         rights,
+        empno: au.empno || null,
+        employeeName,
       });
     }
   } catch (err: any) {
@@ -674,6 +690,25 @@ export async function adminCreateUser(
   }
 }
 
+export async function getAssignableEmployees(forUserId?: string): Promise<{ empno: string; label: string }[]> {
+  await ensureAuthDb();
+  const db = getHopeDb();
+  const rows = await db.query<any>(`
+    SELECT e.empno, e.lastname, e.firstname, au.id as linked_user_id
+    FROM employee e
+    LEFT JOIN app_users au ON au.empno = e.empno
+    WHERE e.is_deleted = false
+    ORDER BY e.lastname ASC, e.firstname ASC
+  `);
+
+  return rows
+    .filter((r: any) => !r.linked_user_id || (forUserId && String(r.linked_user_id) === String(forUserId)))
+    .map((r: any) => ({
+      empno: r.empno,
+      label: `${r.empno}: ${r.lastname || ''}, ${r.firstname || ''}`,
+    }));
+}
+
 export async function updateUserProfile(
   userId: string,
   firstName: string,
@@ -681,7 +716,8 @@ export async function updateUserProfile(
   email: string,
   role?: UserRole,
   passwordHash?: string,
-  updatedBy = 'Admin'
+  updatedBy = 'Admin',
+  empno?: string | null
 ): Promise<{ success: boolean; error?: string }> {
   await ensureAuthDb();
   const db = getHopeDb();
@@ -702,6 +738,36 @@ export async function updateUserProfile(
     return { success: false, error: 'Administrators cannot modify Superadmin accounts.' };
   }
 
+  // Validate empno if provided
+  let validatedEmpno: string | null = null;
+  if (empno !== undefined) {
+    if (empno === null || empno === '' || empno === 'none' || empno === 'None') {
+      validatedEmpno = null;
+    } else {
+      const cleanEmpno = String(empno).trim();
+      const emp = await db.get<any>(
+        'SELECT empno, is_deleted FROM employee WHERE empno = ?',
+        [cleanEmpno]
+      );
+      const existingLink = await db.get<any>(
+        'SELECT id, email FROM app_users WHERE empno = ? AND id::text != ? AND LOWER(email) != ?',
+        [cleanEmpno, userId, cleanEmail]
+      );
+
+      const check = validateEmpnoLink(cleanEmpno, {
+        employeeExists: Boolean(emp),
+        isDeleted: Boolean(emp?.is_deleted),
+        alreadyLinkedToUserId: existingLink?.id ? String(existingLink.id) : null,
+        currentUserId: userId,
+      });
+
+      if (!check.valid) {
+        return { success: false, error: check.error || 'Invalid employee link.' };
+      }
+      validatedEmpno = check.normalizedEmpno;
+    }
+  }
+
   const stamp = getStampString('EDITED', updatedBy);
   const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
   const appRole = role ? role.toLowerCase() : undefined;
@@ -713,16 +779,31 @@ export async function updateUserProfile(
           await db.run("SELECT set_config('app.username', ?, true)", [updatedBy]);
         } catch {}
       }
-      if (appRole) {
-        await db.run(
-          `UPDATE app_users SET full_name = ?, role = ? WHERE id::text = ? OR LOWER(email) = ?`,
-          [fullName, appRole, userId, cleanEmail]
-        );
+
+      if (empno !== undefined) {
+        if (appRole) {
+          await db.run(
+            `UPDATE app_users SET full_name = ?, role = ?, empno = ? WHERE id::text = ? OR LOWER(email) = ?`,
+            [fullName, appRole, validatedEmpno, userId, cleanEmail]
+          );
+        } else {
+          await db.run(
+            `UPDATE app_users SET full_name = ?, empno = ? WHERE id::text = ? OR LOWER(email) = ?`,
+            [fullName, validatedEmpno, userId, cleanEmail]
+          );
+        }
       } else {
-        await db.run(
-          `UPDATE app_users SET full_name = ? WHERE id::text = ? OR LOWER(email) = ?`,
-          [fullName, userId, cleanEmail]
-        );
+        if (appRole) {
+          await db.run(
+            `UPDATE app_users SET full_name = ?, role = ? WHERE id::text = ? OR LOWER(email) = ?`,
+            [fullName, appRole, userId, cleanEmail]
+          );
+        } else {
+          await db.run(
+            `UPDATE app_users SET full_name = ? WHERE id::text = ? OR LOWER(email) = ?`,
+            [fullName, userId, cleanEmail]
+          );
+        }
       }
     }
 

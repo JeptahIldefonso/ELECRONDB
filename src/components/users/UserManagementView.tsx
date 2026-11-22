@@ -101,6 +101,7 @@ export function UserManagementView({ initialUsers, currentUserRole, currentUserI
                 <tr>
                   <th className="py-2.5 px-4 font-semibold">NAME</th>
                   <th className="py-2.5 px-4 font-semibold">EMAIL</th>
+                  <th className="py-2.5 px-4 font-semibold">LINKED EMPLOYEE</th>
                   <th className="py-2.5 px-4 font-semibold w-28">ROLE</th>
                   <th className="py-2.5 px-4 font-semibold w-28">STATUS</th>
                   <th className="py-2.5 px-4 font-semibold text-right w-48">ACTIONS</th>
@@ -126,6 +127,21 @@ export function UserManagementView({ initialUsers, currentUserRole, currentUserI
                       {/* EMAIL */}
                       <td className="py-2.5 px-4 font-mono text-slate-600 dark:text-slate-400">
                         {u.email}
+                      </td>
+
+                      {/* LINKED EMPLOYEE */}
+                      <td className="py-2.5 px-4 font-mono text-[11px] text-slate-700 dark:text-slate-300">
+                        {u.employeeName ? (
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="font-semibold text-slate-900 dark:text-slate-100">{u.empno}</span>
+                            <span className="text-slate-400">·</span>
+                            <span className={u.employeeName.includes('(removed)') ? 'text-amber-600 dark:text-amber-400 font-sans' : 'font-sans'}>
+                              {u.employeeName}
+                            </span>
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 font-sans italic">Unlinked</span>
+                        )}
                       </td>
 
                       {/* ROLE */}

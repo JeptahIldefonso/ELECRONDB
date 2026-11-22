@@ -35,6 +35,7 @@ This document maps all sprint testing deliverables and acceptance test cases fro
 | **S4-DEV-08** | Dedicated Audit Log Viewer for Superadmin | **Automated** | `src/app/(dashboard)/audit/page.tsx`, `tests/unit/audit-filters.test.ts`, `e2e/auth-smoke.spec.ts` |
 | **S4-DBA-04** | Audit Log query performance indexes & sanitization | **Automated** | `database/migrations/24_audit_log_indexes.sql`, `tests/unit/audit-filters.test.ts` |
 | **S4-UIX-03** | Audit Log Viewer UI: filters, table, and diff modal | **Automated** | `src/components/audit/AuditView.tsx` |
+| **S3-DBA-03** | Link `app_users.empno` to EMPLOYEE: FK, unique index, validation & UI | **Automated** | `database/migrations/25_link_app_users_empno.sql`, `database/migrations/26_audit_trigger_empno.sql`, `tests/unit/empno-linking.test.ts`, `scripts/verify-stage4.mjs` |
 
 ---
 
