@@ -11,6 +11,8 @@
 
 import { Pool } from 'pg';
 
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 const VALID_AUDIT_TABLES = [
   'CUSTOMER',
   'PRODUCT',
@@ -87,8 +89,11 @@ async function main() {
   console.log(' HOPE ERP — Stage 3 /audit Viewer Verification');
   console.log('----------------------------------------------------');
 
+  const rawConn = (process.env.DATABASE_URL || '').trim();
+  const connStr = rawConn.replace(/[?&]sslmode=[^&]+/i, '');
+
   const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: connStr,
     ssl: { rejectUnauthorized: false },
   });
 

@@ -16,13 +16,18 @@
 
 import { Pool } from 'pg';
 
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 if (!process.argv.includes('--confirm')) {
   console.error('Refusing to run: scripts/verify-stage4.mjs requires explicit --confirm flag.');
   process.exit(1);
 }
 
+const rawConn = (process.env.DATABASE_URL || '').trim();
+const connStr = rawConn.replace(/[?&]sslmode=[^&]+/i, '');
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: connStr,
   ssl: { rejectUnauthorized: false },
 });
 
