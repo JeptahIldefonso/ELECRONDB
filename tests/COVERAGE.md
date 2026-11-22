@@ -32,6 +32,9 @@ This document maps all sprint testing deliverables and acceptance test cases fro
 | **S4-TST-04** | End-to-end integration: register, verify, login, rights, sell, report | **Not covered yet** | Full cross-module flow requires Stages 2–6 migrations |
 | **S4-TST-05** | Full system regression across all 10 canonical tables | **Manual-only** | Database schema verification via `scripts/verify-db.mjs` |
 | **S4-TST-06** | Final test sign-off & acceptance summary | **Manual-only** | Documented in Sprint Acceptance Review |
+| **S4-DEV-08** | Dedicated Audit Log Viewer for Superadmin | **Automated** | `src/app/(dashboard)/audit/page.tsx`, `tests/unit/audit-filters.test.ts`, `e2e/auth-smoke.spec.ts` |
+| **S4-DBA-04** | Audit Log query performance indexes & sanitization | **Automated** | `database/migrations/24_audit_log_indexes.sql`, `tests/unit/audit-filters.test.ts` |
+| **S4-UIX-03** | Audit Log Viewer UI: filters, table, and diff modal | **Automated** | `src/components/audit/AuditView.tsx` |
 
 ---
 
