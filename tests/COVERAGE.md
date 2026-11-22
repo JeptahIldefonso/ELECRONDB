@@ -9,7 +9,7 @@ This document maps all sprint testing deliverables and acceptance test cases fro
 | Task ID | Description | Status | Test File / Verification Method |
 | :--- | :--- | :---: | :--- |
 | **S1-TST-01** | Sprint 1 Test Plan & Acceptance Criteria | **Manual-only** | Documented in `tests/COVERAGE.md` and Sprint Plan |
-| **S1-TST-02** | Register, login, session, set/reset password rules | **Automated** | `tests/unit/validation.test.ts`, `tests/unit/auth-session.test.ts` |
+| **S1-TST-02** | Register, login, session, set/reset password rules, rights audit | **Automated** | `tests/unit/validation.test.ts`, `tests/unit/auth-session.test.ts`, `tests/unit/rights-diff.test.ts` |
 | **S1-TST-03** | User Management, safety guards, and last-superadmin protection | **Not covered yet** | Rights checked in `tests/unit/permissions.test.ts`; last-superadmin guard test planned for Stage 6 |
 | **S1-TST-04** | Permission Matrix: 36 rights across all 6 modules (Superadmin/Admin/User) | **Automated** | `tests/unit/permissions.test.ts` |
 | **S1-TST-05** | Automated smoke test: login and protected route redirects | **Automated** | `e2e/auth-smoke.spec.ts` |
