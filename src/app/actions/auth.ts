@@ -580,6 +580,99 @@ export async function updateUserProfileAction(data: {
  * - Sets mustChangePassword = 1 and increments sessionVersion to invalidate existing sessions.
  * - Returns tempPassword to caller for one-time display in modal.
  */
+export async function requestPasswordResetAction(email: string): Promise<{
+  success: boolean;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!cleanEmail) {
+      return { success: false, error: 'Enter your email address.' };
+    }
+
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
+    const supabase = await createClient();
+
+    const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+      redirectTo: `${siteUrl}/auth/confirm?type=recovery`,
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return {
+      success: true,
+      message: `If an account exists for ${cleanEmail}, a password recovery link was sent to your Gmail.`,
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to send password reset email.' };
+  }
+}
+
+/**
+ * Admin-initiated password reset via Supabase Email Verification:
+ * Sends an official password recovery link to the user's Gmail address.
+ */
+export async function adminSendPasswordResetEmailAction(email: string): Promise<{
+  success: boolean;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const sessionUser = await getCurrentUser();
+    if (!sessionUser) {
+      return { success: false, error: 'Unauthorized: Please sign in.' };
+    }
+
+    if (sessionUser.role !== 'Superadmin' && sessionUser.role !== 'Admin') {
+      return { success: false, error: 'Access denied: Only administrators can trigger password resets.' };
+    }
+
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!cleanEmail) {
+      return { success: false, error: 'Target user email is required.' };
+    }
+
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
+    const supabase = await createClient();
+
+    const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+      redirectTo: `${siteUrl}/auth/confirm?type=recovery`,
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return {
+      success: true,
+      message: `Password reset verification email has been sent to ${cleanEmail}.`,
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to send password reset email.' };
+  }
+}
+
+export async function updatePasswordFromRecoveryAction(newPassword: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (!newPassword || newPassword.trim().length < 8) {
+      return { success: false, error: 'Password must be at least 8 characters long.' };
+    }
+
+    const supabase = await createClient();
+    const { error } = await supabase.auth.updateUser({ password: newPassword.trim() });
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to update password.' };
+  }
+}
+
 export async function adminResetPasswordAction(targetUserId: string): Promise<{
   success: boolean;
   tempPassword?: string;

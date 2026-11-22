@@ -21,6 +21,9 @@ export async function GET(request: NextRequest) {
       if (!retry.error) error = null;
     }
     if (!error) {
+      if (otpType === 'recovery' || type === 'recovery') {
+        redirect('/change-password?recovery=1');
+      }
       redirect(`${AFTER_VERIFY}?verified=1`);
     } else {
       console.warn('[auth/confirm] verifyOtp error:', error.message, error.code);
@@ -30,6 +33,9 @@ export async function GET(request: NextRequest) {
   if (code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
+      if (type === 'recovery') {
+        redirect('/change-password?recovery=1');
+      }
       redirect(`${AFTER_VERIFY}?verified=1`);
     } else {
       console.warn('[auth/confirm] exchangeCode error:', error.message);

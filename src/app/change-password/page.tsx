@@ -4,7 +4,13 @@ import { ChangePasswordForm } from './ChangePasswordForm';
 
 export const dynamic = 'force-dynamic';
 
-export default async function ChangePasswordPage() {
+export default async function ChangePasswordPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ recovery?: string }>;
+}) {
+  const params = await searchParams;
+  const isRecovery = params.recovery === '1';
   const user = await getCurrentUser();
 
   if (!user) {
@@ -16,6 +22,7 @@ export default async function ChangePasswordPage() {
       email={user.email}
       fullName={user.fullName || 'User'}
       mustChangePassword={Boolean(user.mustChangePassword)}
+      isRecovery={isRecovery}
     />
   );
 }

@@ -3,25 +3,30 @@
 import React, { useState, useTransition } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
+import { useRouter } from 'next/navigation';
 import { Eye, EyeOff, Loader2, ArrowLeft, KeyRound, ShieldAlert, CheckCircle2 } from 'lucide-react';
-import { changePasswordAction } from '@/app/actions/auth';
+import { changePasswordAction, updatePasswordFromRecoveryAction } from '@/app/actions/auth';
 import { TopographicCanvas } from '@/components/ambient/TopographicCanvas';
 
 interface ChangePasswordFormProps {
   email: string;
   fullName: string;
   mustChangePassword: boolean;
+  isRecovery?: boolean;
 }
 
 export function ChangePasswordForm({
   email,
   fullName,
   mustChangePassword,
+  isRecovery = false,
 }: ChangePasswordFormProps) {
+  const router = useRouter();
   const [showCurrent, setShowCurrent] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
   const [isPending, startTransition] = useTransition();
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -33,8 +38,13 @@ export function ChangePasswordForm({
     const newPassword = (formData.get('newPassword') as string) || '';
     const confirmPassword = (formData.get('confirmPassword') as string) || '';
 
-    if (!currentPassword || !newPassword || !confirmPassword) {
-      setError('All fields are required.');
+    if (!isRecovery && !currentPassword) {
+      setError('Current password is required.');
+      return;
+    }
+
+    if (!newPassword || !confirmPassword) {
+      setError('Please fill in your new password.');
       return;
     }
 
@@ -43,8 +53,8 @@ export function ChangePasswordForm({
       return;
     }
 
-    if (newPassword === currentPassword) {
-      setError('New password must be different from your current or temporary password.');
+    if (!isRecovery && newPassword === currentPassword) {
+      setError('New password must be different from your current password.');
       return;
     }
 
@@ -54,9 +64,22 @@ export function ChangePasswordForm({
     }
 
     startTransition(async () => {
-      const res = await changePasswordAction(formData);
-      if (res?.error) {
-        setError(res.error);
+      if (isRecovery) {
+        const res = await updatePasswordFromRecoveryAction(newPassword);
+        if (res.error) {
+          setError(res.error);
+        } else {
+          setSuccess(true);
+          setTimeout(() => {
+            router.push('/?verified=1');
+            router.refresh();
+          }, 1500);
+        }
+      } else {
+        const res = await changePasswordAction(formData);
+        if (res?.error) {
+          setError(res.error);
+        }
       }
     });
   };
@@ -113,21 +136,39 @@ export function ChangePasswordForm({
               <KeyRound className="w-4 h-4" />
             </div>
             <h1 className="font-editorial text-2xl font-normal tracking-tight text-[#041a25]">
-              Change Password
+              {isRecovery ? 'Reset Password' : 'Change Password'}
             </h1>
             <p className="font-sans text-xs text-[#41555f]">
-              {mustChangePassword
+              {isRecovery
+                ? `Enter a new password for your account (${email}).`
+                : mustChangePassword
                 ? 'Your account has a temporary password. Set a permanent password to continue.'
                 : `Signed in as ${fullName} (${email}). Update your account password below.`}
             </p>
           </div>
 
-          {mustChangePassword && (
+          {isRecovery && (
+            <div className="p-3 bg-sky-50 border border-sky-200 rounded-[4px] text-xs text-sky-800 flex items-start gap-2">
+              <CheckCircle2 className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold">Email Verified via Gmail:</span> Choose your new password (minimum 8 characters) to regain access.
+              </div>
+            </div>
+          )}
+
+          {mustChangePassword && !isRecovery && (
             <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-[4px] text-xs text-amber-900 flex items-start gap-2">
               <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
               <div>
                 <span className="font-semibold">Temporary password detected:</span> For your security, you must set a new password of at least 8 characters before accessing the ERP modules.
               </div>
+            </div>
+          )}
+
+          {success && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-[4px] text-xs text-emerald-800 flex items-center gap-2 font-medium">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>Password updated successfully! Redirecting...</span>
             </div>
           )}
 
@@ -141,33 +182,35 @@ export function ChangePasswordForm({
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Current Password / Temporary Password */}
-            <div>
-              <label
-                htmlFor="currentPassword"
-                className="block font-mono text-[11px] uppercase tracking-[0.14em] font-medium text-[#41555f] mb-1.5"
-              >
-                {mustChangePassword ? 'Temporary Password' : 'Current Password'}
-              </label>
-              <div className="relative">
-                <input
-                  id="currentPassword"
-                  name="currentPassword"
-                  type={showCurrent ? 'text' : 'password'}
-                  required
-                  placeholder={mustChangePassword ? 'Enter assigned temporary password' : 'Enter your current password'}
-                  className="w-full h-9 pl-3 pr-9 bg-white border border-black/15 focus:border-[#041a24] focus:ring-1 focus:ring-[#041a24]/20 rounded-[3px] text-xs text-[#041a24] placeholder-[#41555f]/60 outline-none transition-all font-sans"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowCurrent(!showCurrent)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-black/40 hover:text-[#041a24] p-1 rounded transition-colors"
-                  aria-label={showCurrent ? 'Hide password' : 'Show password'}
+            {/* Current Password - Only required if NOT recovery */}
+            {!isRecovery && (
+              <div>
+                <label
+                  htmlFor="currentPassword"
+                  className="block font-mono text-[11px] uppercase tracking-[0.14em] font-medium text-[#41555f] mb-1.5"
                 >
-                  {showCurrent ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
+                  {mustChangePassword ? 'Temporary Password' : 'Current Password'}
+                </label>
+                <div className="relative">
+                  <input
+                    id="currentPassword"
+                    name="currentPassword"
+                    type={showCurrent ? 'text' : 'password'}
+                    required
+                    placeholder={mustChangePassword ? 'Enter assigned temporary password' : 'Enter your current password'}
+                    className="w-full h-9 pl-3 pr-9 bg-white border border-black/15 focus:border-[#041a24] focus:ring-1 focus:ring-[#041a24]/20 rounded-[3px] text-xs text-[#041a24] placeholder-[#41555f]/60 outline-none transition-all font-sans"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrent(!showCurrent)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-black/40 hover:text-[#041a24] p-1 rounded transition-colors"
+                    aria-label={showCurrent ? 'Hide password' : 'Show password'}
+                  >
+                    {showCurrent ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* New Password */}
             <div>
@@ -183,8 +226,7 @@ export function ChangePasswordForm({
                   name="newPassword"
                   type={showNew ? 'text' : 'password'}
                   required
-                  minLength={8}
-                  placeholder="Minimum 8 characters"
+                  placeholder="Enter at least 8 characters"
                   className="w-full h-9 pl-3 pr-9 bg-white border border-black/15 focus:border-[#041a24] focus:ring-1 focus:ring-[#041a24]/20 rounded-[3px] text-xs text-[#041a24] placeholder-[#41555f]/60 outline-none transition-all font-sans"
                 />
                 <button
@@ -212,7 +254,6 @@ export function ChangePasswordForm({
                   name="confirmPassword"
                   type={showConfirm ? 'text' : 'password'}
                   required
-                  minLength={8}
                   placeholder="Re-enter your new password"
                   className="w-full h-9 pl-3 pr-9 bg-white border border-black/15 focus:border-[#041a24] focus:ring-1 focus:ring-[#041a24]/20 rounded-[3px] text-xs text-[#041a24] placeholder-[#41555f]/60 outline-none transition-all font-sans"
                 />
@@ -227,20 +268,23 @@ export function ChangePasswordForm({
               </div>
             </div>
 
-            <button
-              type="submit"
-              disabled={isPending}
-              className="w-full h-9 bg-[#041a24] hover:bg-[#1c313b] active:bg-black disabled:opacity-50 text-white font-medium text-xs rounded-[3px] shadow-2xs flex items-center justify-center gap-2 transition-colors cursor-pointer border border-[#041a24]"
-            >
-              {isPending ? (
-                <span className="flex items-center gap-2">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
-                  <span>Updating Password & Securing Account...</span>
-                </span>
-              ) : (
-                <span>Change Password</span>
-              )}
-            </button>
+            {/* Submit Button */}
+            <div className="pt-2">
+              <button
+                type="submit"
+                disabled={isPending || success}
+                className="w-full h-9 bg-[#041a24] hover:bg-[#1c313b] active:bg-black text-white font-medium text-xs rounded-[3px] shadow-2xs flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {isPending ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Updating password...</span>
+                  </>
+                ) : (
+                  <span>Update Password</span>
+                )}
+              </button>
+            </div>
           </form>
         </div>
       </main>
@@ -251,7 +295,7 @@ export function ChangePasswordForm({
           Hope, Inc. ERP
         </div>
         <div className="font-mono text-[10px] uppercase tracking-wider text-[#41555f]/60">
-          ElectronDB Cryptographic Session Verification
+          Supabase Email Auth · Secure Password Recovery
         </div>
       </footer>
     </div>

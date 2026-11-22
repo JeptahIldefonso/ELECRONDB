@@ -1,9 +1,9 @@
 'use client';
 
 import React, { useState, useTransition } from 'react';
-import { X, KeyRound, Copy, Check, Loader2, ShieldAlert } from 'lucide-react';
+import { X, Mail, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import type { UserAccount, UserRole } from '@/lib/types';
-import { adminResetPasswordAction } from '@/app/actions/auth';
+import { adminSendPasswordResetEmailAction } from '@/app/actions/auth';
 
 interface ResetPasswordModalProps {
   user: UserAccount | null;
@@ -20,50 +20,31 @@ export function ResetPasswordModal({
   currentUserRole,
   onSuccess,
 }: ResetPasswordModalProps) {
-  const [tempPassword, setTempPassword] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [sentMessage, setSentMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   if (!isOpen || !user) return null;
 
   const handleClose = () => {
-    setTempPassword(null);
-    setCopied(false);
+    setSentMessage(null);
     setError(null);
     onClose();
   };
 
-  const handleReset = () => {
+  const handleSendResetEmail = () => {
     setError(null);
     startTransition(async () => {
-      const res = await adminResetPasswordAction(user.userId);
+      const res = await adminSendPasswordResetEmailAction(user.email);
       if (res.error) {
         setError(res.error);
-      } else if (res.tempPassword) {
-        setTempPassword(res.tempPassword);
+      } else {
+        setSentMessage(
+          res.message || `Password reset link sent successfully to ${user.email}!`
+        );
         onSuccess();
       }
     });
-  };
-
-  const handleCopy = async () => {
-    if (!tempPassword) return;
-    try {
-      await navigator.clipboard.writeText(tempPassword);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    } catch {
-      // Fallback if clipboard API is restricted
-      const el = document.createElement('textarea');
-      el.value = tempPassword;
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand('copy');
-      document.body.removeChild(el);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    }
   };
 
   return (
@@ -71,23 +52,28 @@ export function ResetPasswordModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="reset-password-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in-50 duration-150"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in-50 duration-150 font-sans"
     >
-      <div className="bg-surface-1 border border-border rounded-lg shadow-lg w-full max-w-md overflow-hidden text-text font-sans">
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl w-full max-w-md overflow-hidden text-slate-900 dark:text-slate-100">
         {/* Header */}
-        <div className="px-5 py-4 border-b border-border flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded bg-amber-500/10 text-amber-700 dark:text-amber-400 flex items-center justify-center">
-              <KeyRound className="w-4 h-4" />
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-400 flex items-center justify-center">
+              <Mail className="w-4 h-4" />
             </div>
-            <h2 id="reset-password-modal-title" className="font-editorial text-lg text-text">
-              Reset Password
-            </h2>
+            <div>
+              <h2 id="reset-password-modal-title" className="font-editorial text-base font-bold text-slate-900 dark:text-slate-100">
+                Email Password Reset
+              </h2>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Send a secure reset link to the user&apos;s Gmail
+              </p>
+            </div>
           </div>
           <button
             type="button"
             onClick={handleClose}
-            className="text-text-muted hover:text-text p-1 rounded transition-colors"
+            className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1 rounded-md transition-colors cursor-pointer"
             aria-label="Close dialog"
           >
             <X className="w-4 h-4" />
@@ -95,116 +81,91 @@ export function ResetPasswordModal({
         </div>
 
         {/* Body */}
-        <div className="p-5 space-y-4">
+        <div className="p-5 space-y-4 text-xs">
           {error && (
             <div
               role="alert"
-              className="p-3 bg-red-500/10 border border-red-500/20 rounded text-xs text-red-600 dark:text-red-400"
+              className="p-3 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 rounded-lg text-rose-700 dark:text-rose-400 flex items-start gap-2"
             >
-              {error}
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{error}</span>
             </div>
           )}
 
-          {!tempPassword ? (
+          {!sentMessage ? (
             <>
-              <p className="text-xs text-text-muted leading-relaxed">
-                You are initiating a password reset for{' '}
-                <strong className="text-text font-semibold">{user.fullName}</strong> ({user.email}).
+              <p className="text-slate-600 dark:text-slate-300 leading-relaxed">
+                Send a password reset email to{' '}
+                <strong className="text-slate-900 dark:text-slate-100 font-semibold">{user.fullName || user.email}</strong>.
               </p>
 
-              <div className="p-3 bg-surface-2 border border-border rounded text-xs space-y-1.5">
+              {/* User Details Card */}
+              <div className="p-3 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-lg space-y-1.5 font-mono text-[11px]">
                 <div className="flex justify-between">
-                  <span className="text-text-muted font-mono text-[10px] uppercase">User Role</span>
-                  <span className="font-semibold text-text">{user.role}</span>
+                  <span className="text-slate-500 dark:text-slate-400 uppercase">Target Email</span>
+                  <span className="font-semibold text-slate-900 dark:text-slate-100">{user.email}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-text-muted font-mono text-[10px] uppercase">User ID</span>
-                  <span className="font-mono text-text text-[11px]">{user.userId}</span>
+                  <span className="text-slate-500 dark:text-slate-400 uppercase">User Role</span>
+                  <span className="font-semibold text-slate-900 dark:text-slate-100">{user.role}</span>
                 </div>
               </div>
 
-              <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded text-xs text-amber-900 dark:text-amber-300 flex items-start gap-2">
-                <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              {/* Information Notice */}
+              <div className="p-3 bg-sky-50 dark:bg-sky-950/30 border border-sky-200 dark:border-sky-800 rounded-lg text-sky-800 dark:text-sky-300 leading-relaxed flex items-start gap-2">
+                <Mail className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
                 <p>
-                  A 12+ character temporary password will be generated. The user will be required to change it upon their next sign-in, and all active sessions will be invalidated.
+                  A single-use verification link will be delivered directly to the user&apos;s Gmail inbox. The user can click the link to choose their new password.
                 </p>
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
                 <button
                   type="button"
                   onClick={handleClose}
-                  className="px-3 py-1.5 text-xs text-text-muted hover:text-text rounded border border-border hover:bg-surface-2 transition-colors cursor-pointer"
+                  className="px-3.5 py-1.5 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
-                  onClick={handleReset}
+                  onClick={handleSendResetEmail}
                   disabled={isPending}
-                  className="px-3.5 py-1.5 text-xs font-medium text-white bg-[#041a24] hover:bg-[#1c313b] dark:bg-primary-bg dark:text-primary-fg rounded shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  className="px-4 py-1.5 text-xs font-medium text-white bg-[#001A2B] hover:bg-[#00263E] rounded-md shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
                 >
                   {isPending ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Generating Temporary Password...</span>
+                      <span>Sending to Gmail...</span>
                     </>
                   ) : (
-                    <span>Generate Temporary Password</span>
+                    <>
+                      <Mail className="w-3.5 h-3.5" />
+                      <span>Send Reset Link to Gmail</span>
+                    </>
                   )}
                 </button>
               </div>
             </>
           ) : (
             <div className="space-y-4">
-              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded text-xs text-emerald-800 dark:text-emerald-300">
-                Temporary password created successfully. The user must use this to sign in and set their new password.
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-text-muted mb-1.5">
-                  Temporary Password
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    readOnly
-                    value={tempPassword}
-                    className="flex-1 font-mono text-xs px-3 py-2 bg-surface-2 border border-border rounded select-all font-semibold tracking-wide text-text outline-none"
-                    onFocus={(e) => e.target.select()}
-                  />
-                  <button
-                    type="button"
-                    onClick={handleCopy}
-                    className="flex items-center gap-1.5 px-3 py-2 bg-[#041a24] text-white dark:bg-primary-bg dark:text-primary-fg text-xs font-medium rounded hover:bg-[#1c313b] transition-colors cursor-pointer shrink-0"
-                    aria-label="Copy temporary password"
-                  >
-                    {copied ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>Copied!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5" />
-                        <span>Copy</span>
-                      </>
-                    )}
-                  </button>
+              <div className="p-4 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-lg text-emerald-800 dark:text-emerald-300 flex items-start gap-2.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-semibold text-xs">Reset Email Sent Successfully!</p>
+                  <p className="text-[11px] text-emerald-700 dark:text-emerald-400 leading-relaxed">
+                    A password recovery link has been delivered to <strong>{user.email}</strong>. The user can open Gmail and click the link to set their new password.
+                  </p>
                 </div>
               </div>
 
-              <p className="text-[11px] text-amber-700 dark:text-amber-400 font-mono">
-                &bull; Please copy and securely share this password now. It will not be shown again.
-              </p>
-
-              <div className="flex justify-end pt-2 border-t border-border">
+              <div className="flex justify-end pt-2 border-t border-slate-200 dark:border-slate-800">
                 <button
                   type="button"
                   onClick={handleClose}
-                  className="px-4 py-1.5 text-xs font-medium text-white bg-[#041a24] hover:bg-[#1c313b] dark:bg-primary-bg dark:text-primary-fg rounded transition-colors cursor-pointer"
+                  className="px-4 py-1.5 text-xs font-medium text-white bg-[#001A2B] hover:bg-[#00263E] rounded-md transition-colors cursor-pointer"
                 >
-                  Done
+                  Close
                 </button>
               </div>
             </div>
