@@ -44,6 +44,7 @@ export function Sidebar({
     if (href === '/employees') return canAccess(userRole, 'human-resources', userRights);
     if (href === '/reports') return canAccess(userRole, 'reports', userRights);
     if (href === '/users') return canAccess(userRole, 'user-management', userRights);
+    if (href === '/audit') return isSuperadmin;
     return false;
   };
 
@@ -80,6 +81,7 @@ export function Sidebar({
             section: 'ADMINISTRATION',
             items: [
               { href: '/users', label: 'User Management' },
+              ...(isSuperadmin ? [{ href: '/audit', label: 'Audit Log' }] : []),
             ],
           },
         ]

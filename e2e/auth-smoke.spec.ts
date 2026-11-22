@@ -23,6 +23,15 @@ test.describe('Authentication & Route Protection Smoke Tests', () => {
     expect(page.url()).toContain('/login');
   });
 
+  test('Unauthenticated visit to /audit viewer redirects to /login', async ({ page }) => {
+    // Attempt visiting Superadmin audit log directly without session
+    await page.goto('/audit');
+
+    // Expected redirect to /login
+    await page.waitForURL(/\/login/);
+    expect(page.url()).toContain('/login');
+  });
+
   test('Register tab shows password requirement of at least 8 characters', async ({ page }) => {
     await page.goto('/login');
 
